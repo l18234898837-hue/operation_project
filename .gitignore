@@ -1,0 +1,44 @@
+# Python 运行时生成的字节码和缓存文件。
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Python 虚拟环境是本机相关产物，应该在本地重新创建。
+.venv/
+backend/.venv/
+venv/
+env/
+
+# 本地环境文件可能包含密钥，只保留安全的模板文件。
+.env
+.env.*
+!.env.example
+
+# JavaScript 依赖和构建产物由 npm / Vite 自动生成。
+node_modules/
+dist/
+build/
+frontend/node_modules/
+frontend/dist/
+
+# TypeScript / Vue 源码要提交，但 src 目录下生成的 JS 和 sourcemap 属于构建产物。
+frontend/src/**/*.js
+frontend/src/**/*.js.map
+
+# IDE 工作区配置因人而异，通常不提交。
+.idea/
+.vscode/
+
+# macOS 和 Windows 自动生成的系统元数据文件。
+.DS_Store
+Thumbs.db
+
+# 运行日志和临时输出文件不应纳入版本控制。
+*.log
+.runtime/
+
+# 上传文件属于本地测试或运行数据，可能包含敏感内容。
+uploads/
+backend/uploads/
