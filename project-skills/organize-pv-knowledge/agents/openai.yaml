@@ -1,0 +1,8 @@
+interface:
+  display_name: "光伏知识整理"
+  short_description: "将光伏运维资料整理为可入库知识文档"
+  brand_color: "#2563EB"
+  default_prompt: "Use $organize-pv-knowledge to整理新的光伏运维资料并生成可入库知识文档。"
+
+policy:
+  allow_implicit_invocation: true
