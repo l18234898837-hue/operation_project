@@ -34,7 +34,20 @@ class Settings(BaseSettings):
 
     embedding_base_url: str = ""
     embedding_api_key: str = ""
-    embedding_model: str = ""
+    embedding_model: str = "BAAI/bge-m3"
+    embedding_dimension: int = 1024
+
+    rerank_base_url: str = ""
+    rerank_api_key: str = ""
+    rerank_model: str = "BAAI/bge-reranker-v2-m3"
+    rerank_enabled: bool = True
+    rerank_top_n: int = 5
+
+    retrieval_vector_top_k: int = 20
+    retrieval_keyword_top_k: int = 20
+    retrieval_rrf_top_k: int = 20
+    retrieval_final_top_k: int = 5
+    retrieval_rrf_k: int = 60
 
     cors_origins: list[str] = Field(default_factory=lambda: ["http://127.0.0.1:5173", "http://localhost:5173"])
 
