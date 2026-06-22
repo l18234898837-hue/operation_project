@@ -39,3 +39,39 @@ def test_settings_reads_rag_configuration(monkeypatch):
     assert settings.retrieval_rrf_top_k == 33
     assert settings.retrieval_final_top_k == 8
     assert settings.retrieval_rrf_k == 72
+
+
+def test_settings_reads_qa_routing_configuration():
+    settings = Settings(
+        qa_rerank_min_score="0.2",
+        qa_rerank_strong_score="0.6",
+        qa_max_question_chars="500",
+        qa_reference_top_k="5",
+        qa_intent_model="deepseek-ai/DeepSeek-V4-Flash",
+        qa_chat_model="deepseek-ai/DeepSeek-V4-Flash",
+        model_api_timeout_seconds="240",
+    )
+
+    assert settings.qa_rerank_min_score == 0.2
+    assert settings.qa_rerank_strong_score == 0.6
+    assert settings.qa_max_question_chars == 500
+    assert settings.qa_reference_top_k == 5
+    assert settings.qa_intent_model == "deepseek-ai/DeepSeek-V4-Flash"
+    assert settings.qa_chat_model == "deepseek-ai/DeepSeek-V4-Flash"
+    assert settings.model_api_timeout_seconds == 240
+
+
+def test_database_url_escapes_special_characters_in_password():
+    settings = Settings(
+        db_user="postgres",
+        db_password="p@ss/word#1",
+        db_host="127.0.0.1",
+        db_port="5432",
+        db_name="operation_pv",
+    )
+
+    assert settings.database_url.password == "p@ss/word#1"
+    assert (
+        settings.database_url.render_as_string(hide_password=False)
+        == "postgresql+psycopg://postgres:p%40ss%2Fword%231@127.0.0.1:5432/operation_pv"
+    )

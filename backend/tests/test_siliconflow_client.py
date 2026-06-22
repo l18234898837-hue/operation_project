@@ -4,6 +4,7 @@ import httpx
 import pytest
 
 from app.services.siliconflow import (
+    SiliconFlowChatClient,
     SiliconFlowEmbeddingClient,
     SiliconFlowRerankClient,
 )
@@ -158,6 +159,52 @@ async def test_rerank_client_parses_scores_and_document_text_and_sends_payload()
         "top_n": 2,
         "return_documents": True,
     }
+
+
+@pytest.mark.asyncio
+async def test_chat_client_sends_openai_compatible_payload_and_returns_text():
+    captured: dict[str, object] = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["headers"] = dict(request.headers)
+        captured["json"] = json.loads(request.content.decode("utf-8"))
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": "Answer content",
+                        }
+                    }
+                ]
+            },
+        )
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://api.siliconflow.cn/v1",
+    ) as http_client:
+        client = SiliconFlowChatClient(
+            client=http_client,
+            api_key="test-key",
+            model="deepseek-ai/DeepSeek-V4-Flash",
+        )
+        content = await client.chat(
+            messages=[
+                {"role": "system", "content": "You are an assistant"},
+                {"role": "user", "content": "Hello"},
+            ],
+            temperature=0.1,
+        )
+
+    assert content == "Answer content"
+    assert str(captured["url"]).endswith("/chat/completions")
+    assert captured["headers"]["authorization"] == "Bearer test-key"
+    assert captured["json"]["model"] == "deepseek-ai/DeepSeek-V4-Flash"
+    assert captured["json"]["temperature"] == 0.1
+    assert captured["json"]["messages"][1]["content"] == "Hello"
 
 
 @pytest.mark.asyncio

@@ -2,6 +2,7 @@ import app.models
 import app.models.rag  # noqa: F401
 
 from app.db.base import Base
+from app.models.rag import AnswerType
 from sqlalchemy.orm import configure_mappers
 
 
@@ -127,3 +128,8 @@ def test_rag_server_defaults_match_initial_migration():
         column = Base.metadata.tables[table_name].c[column_name]
         assert column.server_default is not None
         assert str(column.server_default.arg) == expected
+
+
+def test_answer_type_supports_next_stage_qa_routes():
+    assert AnswerType.general_llm.value == "general_llm"
+    assert AnswerType.refused.value == "refused"

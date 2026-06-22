@@ -3,6 +3,7 @@ from pathlib import Path
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from sqlalchemy import URL
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
@@ -31,6 +32,7 @@ class Settings(BaseSettings):
     llm_base_url: str = ""
     llm_api_key: str = ""
     llm_model: str = ""
+    model_api_timeout_seconds: float = 180.0
 
     embedding_base_url: str = ""
     embedding_api_key: str = ""
@@ -49,13 +51,24 @@ class Settings(BaseSettings):
     retrieval_final_top_k: int = 5
     retrieval_rrf_k: int = 60
 
+    qa_rerank_min_score: float = 0.2
+    qa_rerank_strong_score: float = 0.6
+    qa_max_question_chars: int = 500
+    qa_reference_top_k: int = 5
+    qa_intent_model: str = "deepseek-ai/DeepSeek-V4-Flash"
+    qa_chat_model: str = "deepseek-ai/DeepSeek-V4-Flash"
+
     cors_origins: list[str] = Field(default_factory=lambda: ["http://127.0.0.1:5173", "http://localhost:5173"])
 
     @property
-    def database_url(self) -> str:
-        return (
-            f"postgresql+psycopg://{self.db_user}:{self.db_password}"
-            f"@{self.db_host}:{self.db_port}/{self.db_name}"
+    def database_url(self) -> URL:
+        return URL.create(
+            "postgresql+psycopg",
+            username=self.db_user,
+            password=self.db_password,
+            host=self.db_host,
+            port=self.db_port,
+            database=self.db_name,
         )
 
 

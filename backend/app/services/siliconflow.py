@@ -91,3 +91,35 @@ class SiliconFlowRerankClient:
 
     def _headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self._api_key}"}
+
+
+class SiliconFlowChatClient:
+    def __init__(
+        self,
+        client: httpx.AsyncClient,
+        api_key: str,
+        model: str,
+    ) -> None:
+        self._client = client
+        self._api_key = api_key
+        self._model = model
+
+    async def chat(
+        self,
+        messages: list[dict[str, str]],
+        temperature: float = 0.1,
+    ) -> str:
+        response = await self._client.post(
+            "/chat/completions",
+            headers=self._headers(),
+            json={
+                "model": self._model,
+                "messages": messages,
+                "temperature": temperature,
+            },
+        )
+        response.raise_for_status()
+        return response.json()["choices"][0]["message"]["content"]
+
+    def _headers(self) -> dict[str, str]:
+        return {"Authorization": f"Bearer {self._api_key}"}

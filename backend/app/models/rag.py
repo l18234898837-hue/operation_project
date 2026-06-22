@@ -48,6 +48,8 @@ class AnswerType(str, enum.Enum):
     faq = "faq"
     rag = "rag"
     fallback = "fallback"
+    general_llm = "general_llm"
+    refused = "refused"
     none = "none"
 
 
