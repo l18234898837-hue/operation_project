@@ -17,7 +17,19 @@
 
 ## 1.1 当前状态
 
-当前仓库里的前端已完成 `Module 02 / Step 1` 的主布局和路由入口，仍属于页面壳阶段，尚未完成真实业务联调。
+当前仓库里的前端已完成浅蓝白视觉基础、登录页、普通用户问答页和管理员问答 Shell 第一版。`/chat` 与 `/admin/chat` 已按设计图拆成可复用问答工作区，并接入 `POST /api/qa/ask`，可用于和后端 RAG 闭环联调。
+
+最新进展：
+
+- 问答页已从单个大页面拆分为 `stores/chat.ts` + 可复用组件。
+- 左侧历史、问答工作区、输入框、回答卡片、来源引用和反馈操作已组件化。
+- 会话切换、发送问题、错误重试、复制回答、推荐问题发问均由 `chat` store 驱动。
+- 复制回答已支持 Clipboard API 失败时的降级复制，并会显示复制成功/失败提示。
+- 来源引用组件已支持默认展示 Top 3，超过 3 条时可展开全部。
+- 管理员问答页已挂载到 `AdminShell`，最左侧 `AdminNav` 支持折叠/展开；折叠后左栏彻底收起，只在页面最左边缘保留与展开态同尺寸的展开按钮。
+- 文档管理页已按设计图完成第一版 mock 可操作链路，支持分类、统计、筛选、分页、上传模拟、启用/禁用、失败原因弹窗和重新解析。
+- 问答日志页已按设计图完成第一版 mock 可操作链路，支持统计卡、类型 tab、搜索筛选、分页、详情抽屉、复制 trace_id、标记已处理和加入未命中问题候选。
+- 当前会话历史仍是本地状态，真实 `GET /api/sessions` 接口完成后再替换数据源。
 
 已完成：
 
@@ -25,15 +37,39 @@
 - 问答页入口 `/chat`
 - 文档管理入口 `/admin/documents`
 - 基础日志入口 `/admin/logs`
-- 未命中问题入口 `/admin/unanswered`
-- 通用工作台布局 `src/layouts/AppShell.vue`
+- 未命中问题入口已收敛到问答日志详情，不再作为独立导航入口
+- 管理员问答入口 `/admin/chat`
+- 管理员工作台布局 `src/layouts/AdminShell.vue`
+- 管理员导航组件 `src/components/app/AdminNav.vue`
+- 管理员最左侧应用导航支持折叠/展开；折叠后左栏彻底收起，只在页面最左边缘保留与展开态同尺寸的展开按钮，状态保存在 `localStorage`
+- 普通用户问答工作区 `/chat`
+- QA 接口封装 `src/api/qa.ts`
+- QA 类型定义 `src/types/qa.ts`
+- QA 展示状态 helper `src/chat/qaPresentation.ts`
+- 本地会话切换 helper `src/chat/conversationModel.ts`
+- 问答状态管理 `src/stores/chat.ts`
+- 历史侧栏组件 `src/components/app/HistorySidebar.vue`
+- 问答工作区组件 `src/components/chat/ChatWorkspace.vue`
+- 输入框组件 `src/components/chat/ChatComposer.vue`
+- 回答卡片组件 `src/components/chat/AnswerCard.vue`
+- 来源引用组件 `src/components/chat/SourceReferences.vue`
+- 反馈操作组件 `src/components/chat/FeedbackBar.vue`
+- 管理员问答页 `src/views/AdminChatView.vue`，复用普通用户问答组件和 `chat` store
+- 管理员问答页身份只在历史侧栏左下角显示为“管理员 / 系统管理员”
+- 文档管理页 `src/views/DocumentManageView.vue`
+- 文档管理类型 `src/types/document.ts`
+- 文档管理 mock 数据 `src/mock/documents.ts`
+- 文档管理状态 `src/stores/documents.ts`
+- 文档管理预留 API `src/api/documents.ts`
 
 尚未完成：
 
-- 真实 API 接入
-- 角色权限和会话状态管理
-- 完整 mock 数据流
-- 问答、上传、日志和未命中问题的真实交互
+- 角色权限管理
+- 会话历史真实接口
+- 独立未命中问题页暂无设计图，当前不作为独立页面推进
+- 文档上传、日志和未命中问题的真实交互
+
+最新下一步：`/admin/logs` 问答日志 mock 可操作链路已完成第一版，等待人工测试确认。未命中问题当前不做独立页面，先作为问答日志详情中的知识缺口处理能力；如后续补独立设计图或批量运营需求，再拆为单独页面。
 
 因此本文档中的完整目录结构仍属于第一阶段目标结构，不代表已经在代码里全部实现。
 
@@ -117,8 +153,7 @@ frontend/src/
 │  ├─ LoginView.vue
 │  ├─ ChatView.vue
 │  ├─ DocumentManageView.vue
-│  ├─ QaLogsView.vue
-│  └─ UnansweredView.vue
+│  └─ QaLogsView.vue
 ├─ App.vue
 └─ main.ts
 ```
@@ -143,7 +178,6 @@ frontend/src/
 /chat                  问答页
 /admin/documents       文档管理页
 /admin/logs            基础日志页
-/admin/unanswered      未命中问题页
 ```
 
 完成标准：
@@ -163,10 +197,11 @@ src/views/LoginView.vue
 src/views/ChatView.vue
 src/views/DocumentManageView.vue
 src/views/QaLogsView.vue
-src/views/UnansweredView.vue
 src/router/index.ts
 src/styles/main.css
 ```
+
+未命中问题当前不是独立页面，相关操作收敛在 `src/views/QaLogsView.vue` 的日志详情抽屉中。
 
 ### Step 2：实现登录和角色入口
 
@@ -193,10 +228,12 @@ src/styles/main.css
 
 ### Step 3：实现问答页
 
+状态：已完成第一版，等待人工测试通过后进入下一步。
+
 目标：
 
 - 问答页是第一阶段前端主页面。
-- 用户和管理员共用同一套问答布局，但不要在问答主界面展示调试信息。
+- 当前先完成普通用户全屏问答布局；管理员复用问答工作区将在 AdminShell 阶段继续收口。
 
 页面结构：
 
@@ -230,22 +267,58 @@ src/styles/main.css
 
 完成标准：
 
-- 可以输入问题并发送。
-- 推荐问题可以点击填入或直接发送。
-- mock 返回可以展示 `answer`、`answer_type`、`references`、`trace_id`。
-- 当 `answer_type = fallback` 或 `none` 时展示固定兜底或无依据提示。
-- 有引用时展示文档名、章节、页码或片段摘要。
+- 可以输入问题并发送到 `POST /api/qa/ask`。
+- 推荐问题可以点击后直接发送。
+- 左侧历史会话可以点击切换右侧对应会话页，不会重复发送历史问题。
+- 返回后展示 `answer`、`answer_type`、`confidence`、`references`。
+- `answer_type = refused` 时展示拒答状态，不伪造来源。
+- 有引用时先展示 Top 3 片段、章节路径和相关度；完整折叠交互放到下一步引用组件继续增强。
 
-### Step 4：实现文档管理页
+### Step 4：实现引用组件和回答操作
+
+目标：
+
+- 将 `references` 展示成来源卡片。
+- 支持默认展示 Top 3，超过 3 条时可展开全部。
+- 补齐复制、重试和基础反馈入口。
+
+完成标准：
+
+- `references.length = 0` 时不伪造来源。
+- `general_llm` 明确提示未使用项目知识库。
+- `refused` 不展示来源。
+- 复制按钮可写入剪贴板，失败时降级复制并提示结果。
+
+### Step 5：实现管理员 Shell
+
+目标：
+
+- 管理员进入 `/admin/chat` 后看到最左侧应用导航、中间历史会话和右侧问答工作区。
+- 管理员问答页复用普通用户问答组件，不重复实现发送、引用、拒答、重试、复制链路。
+- 管理端页面统一挂载在 `AdminShell` 下。
+
+完成标准：
+
+- `/admin/chat`、`/admin/documents`、`/admin/logs` 均有统一管理员导航；旧 `/admin/unanswered` 路径重定向到 `/admin/logs`。
+- 最左侧导航可折叠/展开，折叠状态刷新后保持。
+- 折叠后左栏彻底收起，只在页面最左边缘保留与展开态同尺寸的展开按钮。
+- 管理员身份只在历史侧栏左下角显示，不在最左侧导航额外显示说明卡。
+
+### Step 6：实现文档管理 mock 页面
+
+状态：已完成第一版，等待人工测试确认。当前 `/admin/documents` 已按设计图补齐分类侧栏、统计卡、筛选栏、表格、分页和可操作 mock 链路。
 
 目标：
 
 - 管理员可以上传文档并查看文档入库状态。
-- Module 02 阶段可先用 mock 数据，Module 04 再接真实接口。
+- 当前无真实文档管理 HTTP API，第一阶段先使用 mock 数据和本地状态，后续再替换到真实接口。
 
 页面结构：
 
 - 文档上传入口
+- 文档分类侧栏
+- 统计卡片
+- 搜索和状态筛选
 - 文档列表
 - 文档状态标签
 - 启用 / 禁用操作
@@ -269,8 +342,13 @@ disabled
 - 可以展示解析状态。
 - failed 状态可以查看 `error_message`。
 - ready / disabled 状态有明确视觉区分。
+- 点击分类、搜索、类型、解析状态、启用状态后列表和分页同步变化。
+- 点击上传文档会新增 `processing` mock 记录。
+- 点击失败原因会打开弹窗，并可模拟重新解析。
 
-### Step 5：实现基础日志页
+### Step 7：实现基础日志页
+
+状态：已完成第一版，等待人工测试确认。当前 `/admin/logs` 已按设计图实现统计卡、筛选栏、日志表格和详情抽屉；当前使用 mock 数据和本地状态，真实日志查询接口完成后再替换 `api/logs.ts`。
 
 目标：
 
@@ -292,21 +370,37 @@ disabled
 - answer_type
 - date_from / date_to
 - trace_id
+- 处理状态
+
+建议实现文件：
+
+- `src/types/log.ts`
+- `src/mock/logs.ts`
+- `src/api/logs.ts`
+- `src/stores/logs.ts`
+- `src/logs/logStore.contract.ts`
+- `src/views/QaLogsView.vue`
+- 可选：`src/components/admin/LogDetailDrawer.vue`
 
 完成标准：
 
 - 能用 mock 数据展示日志列表。
 - 可以查看单条日志详情。
 - trace_id 显示清晰，便于复制。
+- 搜索、类型筛选、状态筛选、处理状态筛选、分页均可用。
+- 统计卡随筛选结果变化。
+- 标记处理后，当前行和详情状态同步更新。
+- 可以从详情抽屉把知识缺口日志加入未命中问题候选，当前为本地 mock 操作。
 
-### Step 6：实现未命中问题页
+### Step 8：收敛未命中问题能力
 
 目标：
 
-- 收集拒答问题、证据不足问题和待补充知识点。
-- 为 FAQ 和知识库补充形成回流闭环。
+- 不新增设计图之外的独立未命中问题页。
+- 将未命中问题作为问答日志页中的知识缺口子能力。
+- 保留 `qa_unanswered` 后端表和接口契约，后续如有独立设计图或批量运营需求再拆页。
 
-列表字段：
+日志详情中保留字段：
 
 - 问题内容
 - 触发原因
@@ -325,11 +419,11 @@ resolved
 
 完成标准：
 
-- 管理员可以查看未命中问题。
-- 可以修改处理状态。
-- 能区分证据不足、超范围、无关问题。
+- 管理员在问答日志详情中可以识别知识缺口。
+- 可以从日志详情把问题加入未命中问题候选。
+- 旧 `/admin/unanswered` 路径不会暴露独立页面，而是回到 `/admin/logs`。
 
-### Step 7：抽象 API 和类型
+### Step 9：抽象 API 和类型
 
 目标：
 
@@ -389,7 +483,7 @@ export interface ApiErrorResponse {
 }
 ```
 
-### Step 8：从 mock 切换到真实接口
+### Step 10：从 mock 切换到真实接口
 
 建议顺序：
 
@@ -457,7 +551,7 @@ Module 02 页面壳完成标准：
 - 登录或角色入口可进入系统。
 - 问答页具备输入框、对话区、引用区、追问和拒答展示。
 - 文档管理页具备上传入口、文档列表、状态展示。
-- 日志页和未命中问题页有基础列表。
+- 日志页有基础列表，未命中问题作为日志详情中的知识缺口处理能力。
 - 页面可以使用 mock 数据完整演示一遍。
 - 后续 API 契约可以根据页面字段反推和校准。
 
@@ -468,7 +562,7 @@ Module 02 页面壳完成标准：
 - 有效回答必须展示来源引用。
 - 无证据时展示 `fallback` 或 `none` 状态。
 - 每次问答展示或记录 `trace_id`。
-- 管理员可以查看文档状态、基础日志和未命中问题。
+- 管理员可以查看文档状态、基础日志，并在日志详情中处理未命中问题候选。
 
 ## 9. 建议的 mock 场景
 

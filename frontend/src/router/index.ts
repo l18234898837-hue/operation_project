@@ -1,11 +1,11 @@
 import { createRouter, createWebHistory } from "vue-router";
 
-import AppShell from "../layouts/AppShell.vue";
+import AdminShell from "../layouts/AdminShell.vue";
+import AdminChatView from "../views/AdminChatView.vue";
 import ChatView from "../views/ChatView.vue";
 import DocumentManageView from "../views/DocumentManageView.vue";
 import LoginView from "../views/LoginView.vue";
 import QaLogsView from "../views/QaLogsView.vue";
-import UnansweredView from "../views/UnansweredView.vue";
 
 const router = createRouter({
   history: createWebHistory(),
@@ -20,13 +20,18 @@ const router = createRouter({
       component: LoginView
     },
     {
+      path: "/chat",
+      name: "chat",
+      component: ChatView
+    },
+    {
       path: "/",
-      component: AppShell,
+      component: AdminShell,
       children: [
         {
-          path: "chat",
-          name: "chat",
-          component: ChatView
+          path: "admin/chat",
+          name: "admin-chat",
+          component: AdminChatView
         },
         {
           path: "admin/documents",
@@ -40,8 +45,7 @@ const router = createRouter({
         },
         {
           path: "admin/unanswered",
-          name: "admin-unanswered",
-          component: UnansweredView
+          redirect: "/admin/logs"
         }
       ]
     }

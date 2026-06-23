@@ -1,0 +1,25 @@
+:root {
+  --pv-bg: #f6f9ff;
+  --pv-bg-deep: #eaf2ff;
+  --pv-surface: #ffffff;
+  --pv-surface-soft: #f8fbff;
+  --pv-surface-blue: #eef6ff;
+  --pv-line: #dbe6f7;
+  --pv-line-strong: #b8cdf2;
+  --pv-text: #0d1b3d;
+  --pv-heading: #071735;
+  --pv-muted: #6c7da3;
+  --pv-faint: #98a8c7;
+  --pv-primary: #126bff;
+  --pv-primary-strong: #0057f0;
+  --pv-cyan: #26d7ef;
+  --pv-success: #18b66a;
+  --pv-warning: #ff9f1c;
+  --pv-danger: #f04438;
+  --pv-shadow: 0 18px 50px rgba(28, 77, 156, 0.12);
+  --pv-shadow-card: 0 12px 32px rgba(32, 88, 171, 0.1);
+  --pv-radius-lg: 28px;
+  --pv-radius-md: 18px;
+  --pv-radius-sm: 12px;
+  --pv-font-body: "Microsoft YaHei UI", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
+}
