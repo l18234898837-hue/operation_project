@@ -1,9 +1,10 @@
 <script setup lang="ts">
+import logoUrl from "../assets/logo-transparent.png";
+
 const navItems = [
   { label: "智能问答", to: "/chat", code: "QA" },
   { label: "文档管理", to: "/admin/documents", code: "DOC" },
-  { label: "基础日志", to: "/admin/logs", code: "LOG" },
-  { label: "未命中问题", to: "/admin/unanswered", code: "MISS" }
+  { label: "基础日志", to: "/admin/logs", code: "LOG" }
 ];
 </script>
 
@@ -12,7 +13,7 @@ const navItems = [
     <div class="pv-shell">
       <aside class="side-nav">
         <RouterLink class="brand-lockup" to="/chat">
-          <span class="brand-mark">PV</span>
+          <img class="brand-mark brand-logo" :src="logoUrl" alt="光伏智能问答系统" />
           <div>
             <strong>光伏智能问答</strong>
             <p class="eyebrow">RAG MVP</p>

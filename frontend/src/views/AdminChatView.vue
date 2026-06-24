@@ -22,10 +22,13 @@ const {
 </script>
 
 <template>
-  <main class="chat-page">
+  <div class="admin-chat-page">
     <HistorySidebar
       :active-conversation-id="activeConversationId"
+      brand-to="/admin/chat"
       :history-groups="historyGroups"
+      user-name="管理员"
+      user-role-label="系统管理员"
       @select="chatStore.selectConversation"
     />
 
@@ -44,5 +47,5 @@ const {
       @retry="chatStore.retryLastQuestion"
       @send="chatStore.sendQuestion"
     />
-  </main>
+  </div>
 </template>
