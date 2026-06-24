@@ -1,10 +1,12 @@
 <script setup lang="ts">
 import { storeToRefs } from "pinia";
+import { useRouter } from "vue-router";
 
 import HistorySidebar from "../components/app/HistorySidebar.vue";
 import ChatWorkspace from "../components/chat/ChatWorkspace.vue";
 import { useChatStore } from "../stores/chat";
 
+const router = useRouter();
 const chatStore = useChatStore();
 const {
   activeConversationId,
@@ -12,20 +14,33 @@ const {
   canSend,
   copyMessage,
   errorMessage,
+  hasHistorySearchResults,
   historyGroups,
+  historyQuery,
   latestResponse,
   messages,
   pageTitle,
   question,
-  status
+  status,
+  streamStatusMessage
 } = storeToRefs(chatStore);
+
+function logout() {
+  chatStore.logout();
+  void router.push("/login");
+}
 </script>
 
 <template>
   <main class="chat-page">
     <HistorySidebar
+      v-model:search-query="historyQuery"
       :active-conversation-id="activeConversationId"
+      :has-search-results="hasHistorySearchResults"
       :history-groups="historyGroups"
+      @delete="chatStore.deleteConversation"
+      @logout="logout"
+      @new="chatStore.newConversation"
       @select="chatStore.selectConversation"
     />
 
@@ -34,7 +49,7 @@ const {
       :answer-description="answerDescription"
       :can-send="canSend"
       :copy-message="copyMessage"
-      :error-message="errorMessage"
+      :error-message="errorMessage || streamStatusMessage"
       :latest-response="latestResponse"
       :messages="messages"
       :page-title="pageTitle"

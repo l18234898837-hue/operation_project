@@ -18,6 +18,8 @@ const conversations = [
     time: "11:20",
     group: "今天",
     status: "answered",
+    createdAt: 1_717_569_600_000,
+    updatedAt: 1_717_573_200_000,
     messages: [
       {
         id: "m1",
