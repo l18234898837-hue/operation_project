@@ -3,12 +3,17 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 import asyncio
 import json
+import logging
+import time
 from typing import Any
 
 from sqlalchemy.orm import Session
 
 from app.schemas.qa import QaAskResponse
+from app.services.qa_debug_logging import log_qa_debug_event
 from app.services.qa_service import QaDependencies, answer_question
+
+logger = logging.getLogger(__name__)
 
 STATUS_UNDERSTANDING = "understanding"
 STATUS_REWRITING = "rewriting"
@@ -37,7 +42,21 @@ async def stream_qa_events(
     qa_reference_min_score: float = 0.3,
     qa_reference_visible_top_k: int = 3,
     qa_reference_max_top_k: int = 5,
+    qa_debug_log_enabled: bool = False,
+    qa_debug_question_preview_chars: int = 80,
+    qa_debug_evidence_preview_enabled: bool = False,
 ) -> AsyncIterator[str]:
+    start = time.perf_counter()
+    first_delta_sent = False
+    _log_stream_debug(
+        enabled=qa_debug_log_enabled,
+        event="qa.sse.start",
+        preview_chars=qa_debug_question_preview_chars,
+        evidence_preview_enabled=qa_debug_evidence_preview_enabled,
+        session_id=session_id,
+        question=question,
+        question_length=len(question),
+    )
     try:
         yield format_sse_event(
             "status",
@@ -73,6 +92,9 @@ async def stream_qa_events(
                 qa_reference_min_score=qa_reference_min_score,
                 qa_reference_visible_top_k=qa_reference_visible_top_k,
                 qa_reference_max_top_k=qa_reference_max_top_k,
+                qa_debug_log_enabled=qa_debug_log_enabled,
+                qa_debug_question_preview_chars=qa_debug_question_preview_chars,
+                qa_debug_evidence_preview_enabled=qa_debug_evidence_preview_enabled,
             )
         )
         while True:
@@ -84,12 +106,44 @@ async def stream_qa_events(
                 continue
             if chunk is None:
                 continue
+            if not first_delta_sent:
+                first_delta_sent = True
+                _log_stream_debug(
+                    enabled=qa_debug_log_enabled,
+                    event="qa.sse.first_delta",
+                    preview_chars=qa_debug_question_preview_chars,
+                    evidence_preview_enabled=qa_debug_evidence_preview_enabled,
+                    session_id=session_id,
+                    first_delta_ms=_elapsed_ms(start),
+                )
             yield format_sse_event("answer_delta", {"text": chunk})
 
         response = await answer_task
+        _log_stream_debug(
+            enabled=qa_debug_log_enabled,
+            event="qa.sse.finish",
+            preview_chars=qa_debug_question_preview_chars,
+            evidence_preview_enabled=qa_debug_evidence_preview_enabled,
+            trace_id=response.trace_id,
+            session_id=response.session_id,
+            route=response.decision.get("route"),
+            answer_type=response.answer_type,
+            references_count=len(response.references),
+            total_ms=_elapsed_ms(start),
+        )
         for event in _response_tail_events(response):
             yield event
     except Exception as exc:
+        _log_stream_debug(
+            enabled=qa_debug_log_enabled,
+            event="qa.sse.error",
+            preview_chars=qa_debug_question_preview_chars,
+            evidence_preview_enabled=qa_debug_evidence_preview_enabled,
+            session_id=session_id,
+            error_type=type(exc).__name__,
+            error=str(exc),
+            total_ms=_elapsed_ms(start),
+        )
         yield format_sse_event(
             "error",
             {"stage": STATUS_ERROR, "message": "问答服务处理异常", "error": str(exc)},
@@ -166,3 +220,24 @@ class _StreamingAnswerClient:
         await self._queue.put(answer)
         await self._queue.put(None)
         return answer
+
+
+def _log_stream_debug(
+    enabled: bool,
+    event: str,
+    preview_chars: int,
+    evidence_preview_enabled: bool,
+    **fields: object,
+) -> None:
+    log_qa_debug_event(
+        logger=logger,
+        enabled=enabled,
+        event=event,
+        preview_chars=preview_chars,
+        evidence_preview_enabled=evidence_preview_enabled,
+        **fields,
+    )
+
+
+def _elapsed_ms(start: float) -> int:
+    return int((time.perf_counter() - start) * 1000)

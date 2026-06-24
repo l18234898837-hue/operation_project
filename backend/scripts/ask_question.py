@@ -83,6 +83,9 @@ async def ask_once(question: str, session_id=None):
                     qa_reference_min_score=settings.qa_reference_min_score,
                     qa_reference_visible_top_k=settings.qa_reference_visible_top_k,
                     qa_reference_max_top_k=settings.qa_reference_max_top_k,
+                    qa_debug_log_enabled=settings.qa_debug_log_enabled,
+                    qa_debug_question_preview_chars=settings.qa_debug_question_preview_chars,
+                    qa_debug_evidence_preview_enabled=settings.qa_debug_evidence_preview_enabled,
                 )
         except httpx.TimeoutException as exc:
             raise SystemExit(

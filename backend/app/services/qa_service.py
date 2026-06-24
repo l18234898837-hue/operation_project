@@ -26,6 +26,7 @@ from app.services.evidence_filtering import (
     filter_evidence_for_answer,
     filter_references_for_response,
 )
+from app.services.qa_debug_logging import log_qa_debug_event
 from app.services.qa_error_handling import classify_qa_exception
 from app.services.qa_trace import (
     QaTraceCollector,
@@ -86,6 +87,13 @@ class QaDependencies:
     session_summarizer: SessionSummarizer | None = None
 
 
+@dataclass(frozen=True)
+class QaDebugContext:
+    enabled: bool = False
+    preview_chars: int = 80
+    evidence_preview_enabled: bool = False
+
+
 async def answer_question(
     session: Session,
     question: str,
@@ -101,16 +109,39 @@ async def answer_question(
     qa_reference_min_score: float = 0.3,
     qa_reference_visible_top_k: int = 3,
     qa_reference_max_top_k: int = 5,
+    qa_debug_log_enabled: bool = False,
+    qa_debug_question_preview_chars: int = 80,
+    qa_debug_evidence_preview_enabled: bool = False,
 ) -> QaAskResponse:
     start = time.perf_counter()
     trace_id = uuid.uuid4().hex
     trace = QaTraceCollector(trace_id=trace_id)
     timings: dict[str, int] = {}
     qa_session: QaSession | None = None
+    debug_context = QaDebugContext(
+        enabled=qa_debug_log_enabled,
+        preview_chars=qa_debug_question_preview_chars,
+        evidence_preview_enabled=qa_debug_evidence_preview_enabled,
+    )
     try:
+        _log_debug(
+            debug_context,
+            "qa.request.start",
+            trace_id=trace_id,
+            session_id=session_id,
+            question=question,
+            question_length=len(question),
+        )
         step_start = time.perf_counter()
         qa_session = _get_or_create_session(session, session_id)
         _record_timing(timings, trace, "get_or_create_session", step_start)
+        _log_debug(
+            debug_context,
+            "qa.session.ready",
+            trace_id=trace_id,
+            session_id=qa_session.id,
+            duration_ms=timings.get("get_or_create_session_ms"),
+        )
         return await _answer_question_inner(
             session=session,
             qa_session=qa_session,
@@ -130,8 +161,17 @@ async def answer_question(
             trace=trace,
             start=start,
             timings=timings,
+            debug_context=debug_context,
         )
     except Exception as exc:
+        _log_debug(
+            debug_context,
+            "qa.exception",
+            trace_id=trace_id,
+            session_id=getattr(qa_session, "id", session_id),
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
         step_start = time.perf_counter()
         session.rollback()
         _record_timing(timings, trace, "rollback", step_start)
@@ -192,12 +232,25 @@ async def answer_question(
         step_start = time.perf_counter()
         session.commit()
         timings["db_commit_ms"] = _elapsed_ms(step_start)
+        timings["total_ms"] = _latency_ms(start)
         _log_timing(
             trace_id=trace_id,
             session_id=qa_session.id,
             route="refused",
             timings=timings,
             error_reason=decision.reason,
+        )
+        _log_debug(
+            debug_context,
+            "qa.request.finish",
+            trace_id=trace_id,
+            session_id=qa_session.id,
+            route="refused",
+            answer_type=AnswerType.refused.value,
+            intent=understanding.intent.value,
+            error_reason=decision.reason,
+            total_ms=timings.get("total_ms"),
+            timings_ms=timings,
         )
         return _response_from_record(record, understanding.intent.value, [])
 
@@ -221,10 +274,19 @@ async def _answer_question_inner(
     trace: QaTraceCollector,
     start: float,
     timings: dict[str, int],
+    debug_context: QaDebugContext,
 ) -> QaAskResponse:
     step_start = time.perf_counter()
     previous_records = _list_session_records(session, qa_session.id)
     _record_timing(timings, trace, "load_history", step_start)
+    _log_debug(
+        debug_context,
+        "qa.history.loaded",
+        trace_id=trace_id,
+        session_id=qa_session.id,
+        records_count=len(previous_records),
+        duration_ms=timings.get("load_history_ms"),
+    )
 
     step_start = time.perf_counter()
     context = build_conversation_context(
@@ -235,11 +297,32 @@ async def _answer_question_inner(
         max_chars=context_max_chars,
     )
     _record_timing(timings, trace, "build_context", step_start)
+    _log_debug(
+        debug_context,
+        "qa.context.built",
+        trace_id=trace_id,
+        session_id=qa_session.id,
+        used_history=context.used_history,
+        recent_turns_count=len(context.recent_turns),
+        has_summary=bool(context.session_summary),
+        duration_ms=timings.get("build_context_ms"),
+    )
 
     step_start = time.perf_counter()
     rewrite_result = await _rewrite_question(question, context, dependencies)
     _record_timing(timings, trace, "rewrite_question", step_start)
     question_for_understanding = rewrite_result.standalone_question
+    _log_debug(
+        debug_context,
+        "qa.question.rewritten",
+        trace_id=trace_id,
+        session_id=qa_session.id,
+        standalone_question=question_for_understanding,
+        used_history=rewrite_result.used_history,
+        is_follow_up=rewrite_result.is_follow_up,
+        reason=rewrite_result.reason,
+        duration_ms=timings.get("rewrite_question_ms"),
+    )
 
     step_start = time.perf_counter()
     understanding = await dependencies.understanding_client.understand(
@@ -247,6 +330,19 @@ async def _answer_question_inner(
     )
     _record_timing(timings, trace, "understand_intent", step_start)
     rewrite_metadata = _rewrite_metadata(question, rewrite_result)
+    _log_debug(
+        debug_context,
+        "qa.intent.understood",
+        trace_id=trace_id,
+        session_id=qa_session.id,
+        intent=understanding.intent.value,
+        intent_confidence=understanding.confidence,
+        should_use_knowledge_base=understanding.should_use_knowledge_base,
+        normalized_question=understanding.normalized_question,
+        search_query=understanding.search_query,
+        reason=understanding.reason,
+        duration_ms=timings.get("understand_intent_ms"),
+    )
 
     if understanding.intent in _REFUSED_INTENTS:
         reason = understanding.refusal_reason or understanding.intent.value
@@ -290,6 +386,7 @@ async def _answer_question_inner(
             start=start,
             timings=timings,
             route="refused",
+            debug_context=debug_context,
         )
 
     if (
@@ -332,6 +429,7 @@ async def _answer_question_inner(
             start=start,
             timings=timings,
             route="general_llm",
+            debug_context=debug_context,
         )
 
     search_query = understanding.search_query or understanding.normalized_question
@@ -339,6 +437,17 @@ async def _answer_question_inner(
     evidence = await dependencies.retriever.retrieve(search_query)
     _record_timing(timings, trace, "retrieve_evidence", step_start)
     top_score = _top_rerank_score(evidence)
+    _log_debug(
+        debug_context,
+        "qa.evidence.retrieved",
+        trace_id=trace_id,
+        session_id=qa_session.id,
+        search_query=search_query,
+        evidence=evidence,
+        evidence_count=len(evidence),
+        top1_rerank_score=top_score,
+        duration_ms=timings.get("retrieve_evidence_ms"),
+    )
 
     if top_score is None or top_score < min_rerank_score:
         answer = "当前知识库没有找到足够相关的依据，暂时无法可靠回答该问题。"
@@ -383,6 +492,7 @@ async def _answer_question_inner(
             start=start,
             timings=timings,
             route="refused",
+            debug_context=debug_context,
         )
 
     step_start = time.perf_counter()
@@ -397,6 +507,17 @@ async def _answer_question_inner(
         max_items=qa_reference_max_top_k,
     )
     _record_timing(timings, trace, "filter_evidence", step_start)
+    _log_debug(
+        debug_context,
+        "qa.evidence.filtered",
+        trace_id=trace_id,
+        session_id=qa_session.id,
+        evidence_for_answer_count=len(evidence_for_answer),
+        reference_count=len(evidence_for_response),
+        evidence_min_score=qa_evidence_min_score,
+        reference_min_score=qa_reference_min_score,
+        duration_ms=timings.get("filter_evidence_ms"),
+    )
     if not evidence_for_answer:
         answer = "当前知识库检索结果未达到进入答案生成的证据阈值，暂时无法可靠回答该问题。"
         record = _add_record(
@@ -440,6 +561,7 @@ async def _answer_question_inner(
             start=start,
             timings=timings,
             route="refused",
+            debug_context=debug_context,
         )
 
     cautious = top_score < strong_rerank_score
@@ -499,6 +621,7 @@ async def _answer_question_inner(
         start=start,
         timings=timings,
         route="rag",
+        debug_context=debug_context,
     )
 
 
@@ -579,6 +702,7 @@ async def _finalize_response(
     start: float,
     timings: dict[str, int],
     route: str,
+    debug_context: QaDebugContext,
 ) -> QaAskResponse:
     step_start = time.perf_counter()
     await _maybe_update_summary(
@@ -608,6 +732,19 @@ async def _finalize_response(
         session_id=qa_session.id,
         route=route,
         timings=timings,
+    )
+    _log_debug(
+        debug_context,
+        "qa.request.finish",
+        trace_id=trace_id,
+        session_id=qa_session.id,
+        route=route,
+        answer_type=record.answer_type.value,
+        intent=intent,
+        confidence=record.confidence,
+        references_count=len(references),
+        total_ms=timings.get("total_ms"),
+        timings_ms=timings,
     )
     return _response_from_record(record, intent, references)
 
@@ -796,6 +933,21 @@ def _log_timing(
         route,
         error_reason,
         dict(timings),
+    )
+
+
+def _log_debug(
+    context: QaDebugContext,
+    event: str,
+    **fields: object,
+) -> None:
+    log_qa_debug_event(
+        logger=logger,
+        enabled=context.enabled,
+        event=event,
+        preview_chars=context.preview_chars,
+        evidence_preview_enabled=context.evidence_preview_enabled,
+        **fields,
     )
 
 

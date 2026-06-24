@@ -91,6 +91,18 @@ def test_settings_reads_reference_filtering_configuration():
     assert settings.qa_reference_max_top_k == 5
 
 
+def test_settings_reads_qa_debug_logging_configuration():
+    settings = Settings(
+        qa_debug_log_enabled="true",
+        qa_debug_question_preview_chars="60",
+        qa_debug_evidence_preview_enabled="true",
+    )
+
+    assert settings.qa_debug_log_enabled is True
+    assert settings.qa_debug_question_preview_chars == 60
+    assert settings.qa_debug_evidence_preview_enabled is True
+
+
 def test_normalize_env_file_script_imports_safely_without_executing_main():
     import backend.scripts.normalize_env_file as normalize_script
 

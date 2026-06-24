@@ -1,4 +1,6 @@
 from types import SimpleNamespace
+import json
+import logging
 import uuid
 
 import pytest
@@ -178,6 +180,43 @@ async def test_answer_question_persists_trace_steps_for_rag_route():
     }
     assert all(step.qa_record_id is not None for step in trace_steps)
     assert all(step.trace_id for step in trace_steps)
+
+
+@pytest.mark.asyncio
+async def test_answer_question_writes_structured_debug_logs_when_enabled(caplog):
+    session = FakeSession()
+    dependencies = make_dependencies(make_understanding(), make_evidence(score=0.8))
+
+    with caplog.at_level(logging.INFO, logger="app.services.qa_service"):
+        response = await answer_question(
+            session=session,
+            question="逆变器绝缘阻抗低怎么排查？",
+            dependencies=dependencies,
+            min_rerank_score=0.2,
+            strong_rerank_score=0.6,
+            reference_top_k=5,
+            qa_debug_log_enabled=True,
+            qa_debug_question_preview_chars=10,
+        )
+
+    payloads = [
+        json.loads(record.message.removeprefix("qa_debug "))
+        for record in caplog.records
+        if record.message.startswith("qa_debug ")
+    ]
+
+    assert response.answer_type == "rag"
+    assert {payload["event"] for payload in payloads} >= {
+        "qa.request.start",
+        "qa.intent.understood",
+        "qa.evidence.retrieved",
+        "qa.evidence.filtered",
+        "qa.request.finish",
+    }
+    finish = next(payload for payload in payloads if payload["event"] == "qa.request.finish")
+    assert finish["route"] == "rag"
+    assert finish["answer_type"] == "rag"
+    assert finish["references_count"] == 1
 
 
 @pytest.mark.asyncio

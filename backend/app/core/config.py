@@ -61,6 +61,9 @@ class Settings(BaseSettings):
     qa_reference_min_score: float = 0.3
     qa_reference_visible_top_k: int = 3
     qa_reference_max_top_k: int = 5
+    qa_debug_log_enabled: bool = False
+    qa_debug_question_preview_chars: int = 80
+    qa_debug_evidence_preview_enabled: bool = False
 
     conversation_history_turns: int = 10
     conversation_summary_after_turns: int = 10
