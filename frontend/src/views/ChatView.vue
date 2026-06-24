@@ -57,7 +57,7 @@ function logout() {
       :stream-status-message="streamStatusMessage"
       @ask="chatStore.sendQuestion"
       @copy="chatStore.copyAnswer"
-      @retry="chatStore.retryLastQuestion"
+      @retry="chatStore.retryLastQuestion($event)"
       @send="chatStore.sendQuestion"
     />
   </main>

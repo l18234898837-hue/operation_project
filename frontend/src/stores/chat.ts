@@ -410,27 +410,41 @@ export const useChatStore = defineStore("chat", () => {
     streamStatusMessage.value = "";
   }
 
-  function retryLastQuestion() {
+  function findRetryUserIndex(conversation: Conversation, assistantMessageId?: string) {
+    const startIndex = assistantMessageId
+      ? conversation.messages.findIndex(
+          (message) => message.id === assistantMessageId && message.role === "assistant"
+        )
+      : conversation.messages.length - 1;
+
+    if (startIndex === -1) {
+      return -1;
+    }
+
+    for (let index = startIndex; index >= 0; index -= 1) {
+      if (conversation.messages[index]?.role === "user") {
+        return index;
+      }
+    }
+
+    return -1;
+  }
+
+  function retryLastQuestion(assistantMessageId?: string) {
     const conversation = getActiveConversation();
 
     if (!conversation || isStreamingStatus(conversation.status)) {
       return;
     }
 
-    let lastUserIndex = -1;
-    for (let index = conversation.messages.length - 1; index >= 0; index -= 1) {
-      if (conversation.messages[index]?.role === "user") {
-        lastUserIndex = index;
-        break;
-      }
-    }
+    const userMessageIndex = findRetryUserIndex(conversation, assistantMessageId);
 
-    if (lastUserIndex === -1) {
+    if (userMessageIndex === -1) {
       return;
     }
 
-    const userMessage = conversation.messages[lastUserIndex];
-    conversation.messages = conversation.messages.slice(0, lastUserIndex + 1);
+    const userMessage = conversation.messages[userMessageIndex];
+    conversation.messages = conversation.messages.slice(0, userMessageIndex + 1);
     conversation.status = "asking";
     lastQuestion.value = userMessage.content;
 

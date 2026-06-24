@@ -31,7 +31,7 @@ const props = withDefaults(defineProps<{
 const emit = defineEmits<{
   send: [];
   ask: [question: string];
-  retry: [];
+  retry: [assistantMessageId?: string];
   copy: [content: string];
 }>();
 
@@ -82,7 +82,7 @@ watch(
           :message="message"
           :status-text="streamStatusMessage"
           @copy="emit('copy', $event)"
-          @retry="emit('retry')"
+          @retry="emit('retry', $event)"
         />
       </template>
     </div>

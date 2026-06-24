@@ -12,7 +12,7 @@ withDefaults(defineProps<{
 
 defineEmits<{
   copy: [content: string];
-  retry: [];
+  retry: [assistantMessageId?: string];
 }>();
 </script>
 
@@ -38,7 +38,7 @@ defineEmits<{
       v-if="message.role === 'assistant' && message.status !== 'streaming'"
       :show-copy="message.status !== 'error'"
       @copy="$emit('copy', message.content)"
-      @retry="$emit('retry')"
+      @retry="$emit('retry', message.id)"
     />
   </article>
 </template>
