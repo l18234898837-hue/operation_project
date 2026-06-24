@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 
 from app.main import create_app
 from app.schemas.qa import QaAskRequest, QaAskResponse, QaReferenceSchema
+from app.services.qa_service import _add_references, _reference_schema
 
 
 def test_qa_request_trims_question():
@@ -102,6 +103,83 @@ def test_qa_reference_schema_contains_scores():
 
     assert reference.rerank_score == 0.9
     assert reference.visible is True
+
+
+def test_qa_reference_schema_contains_document_file_name():
+    reference = QaReferenceSchema(
+        rank=1,
+        segment_id="segment-1",
+        document_id="document-1",
+        document_file_name="inverter-maintenance.md",
+        heading_path="逆变器故障与维护 > 漏电流故障",
+        excerpt="漏电流可能与组件绝缘层破损有关。",
+        vector_score=0.6,
+        keyword_score=0.4,
+        rrf_score=0.03,
+        rerank_score=0.9,
+        visible=True,
+    )
+
+    assert reference.document_file_name == "inverter-maintenance.md"
+    assert reference.model_dump()["document_file_name"] == "inverter-maintenance.md"
+
+
+class _ReferenceItem:
+    segment_id = "segment-1"
+    document_id = "document-1"
+    heading_path = "逆变器故障与维护 > 漏电流故障"
+    clean_text = "漏电流可能与组件绝缘层破损有关。"
+    vector_score = 0.6
+    keyword_score = 0.4
+    rrf_score = 0.03
+    rerank_score = 0.9
+
+
+def test_reference_schema_uses_document_file_name():
+    schema = _reference_schema(
+        rank=1,
+        item=_ReferenceItem(),
+        visible=True,
+        document_file_name="inverter-maintenance.md",
+    )
+
+    assert schema.document_file_name == "inverter-maintenance.md"
+
+
+class _ExecuteRows:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def all(self):
+        return self._rows
+
+
+class _ReferenceSession:
+    def __init__(self, rows):
+        self.rows = rows
+        self.added = []
+
+    def execute(self, statement):
+        return _ExecuteRows(self.rows)
+
+    def add(self, item):
+        self.added.append(item)
+
+
+def test_add_references_maps_document_file_name_for_parseable_uuid_strings():
+    document_id = uuid.UUID("12345678-1234-5678-1234-567812345678")
+    segment_id = uuid.UUID("87654321-4321-8765-4321-876543218765")
+    item = _ReferenceItem()
+    item.document_id = f"{{{str(document_id).upper()}}}"
+    item.segment_id = str(segment_id)
+    session = _ReferenceSession(
+        [(document_id, "inverter-maintenance.md", "Inverter Maintenance")]
+    )
+    record = type("Record", (), {"id": uuid.uuid4()})()
+
+    references = _add_references(session, record, [item], visible_top_k=1)
+
+    assert references[0].document_file_name == "inverter-maintenance.md"
 
 
 def test_qa_ask_endpoint_returns_response_with_references():

@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.models.rag import (
     AnswerType,
+    KbDocument,
     QaRecord,
     QaReference,
     QaSession,
@@ -817,6 +818,7 @@ def _add_references(
     visible_top_k: int,
 ) -> list[QaReferenceSchema]:
     references: list[QaReferenceSchema] = []
+    document_file_names = _document_file_names(session, evidence)
     for rank, item in enumerate(evidence, start=1):
         reference = QaReference(
             qa_record_id=record.id,
@@ -831,8 +833,40 @@ def _add_references(
             ref_metadata={"heading_path": getattr(item, "heading_path", "") or ""},
         )
         session.add(reference)
-        references.append(_reference_schema(rank, item, visible=rank <= visible_top_k))
+        document_id = _document_file_name_key(getattr(item, "document_id", None))
+        references.append(
+            _reference_schema(
+                rank,
+                item,
+                visible=rank <= visible_top_k,
+                document_file_name=document_file_names.get(document_id),
+            )
+        )
     return references
+
+
+def _document_file_name_key(document_id: object) -> str | None:
+    parsed = _uuid_or_none(document_id)
+    return str(parsed) if parsed is not None else None
+
+
+def _document_file_names(session: Session, evidence: list[object]) -> dict[str, str]:
+    document_ids = {
+        parsed
+        for item in evidence
+        if (parsed := _uuid_or_none(getattr(item, "document_id", None))) is not None
+    }
+    if not document_ids:
+        return {}
+
+    rows = session.execute(
+        select(KbDocument.id, KbDocument.file_name, KbDocument.title).where(KbDocument.id.in_(document_ids))
+    ).all()
+    return {
+        str(document_id): file_name or title
+        for document_id, file_name, title in rows
+        if file_name or title
+    }
 
 
 def _add_unanswered(
@@ -871,11 +905,17 @@ def _response_from_record(
     )
 
 
-def _reference_schema(rank: int, item: object, visible: bool = True) -> QaReferenceSchema:
+def _reference_schema(
+    rank: int,
+    item: object,
+    visible: bool = True,
+    document_file_name: str | None = None,
+) -> QaReferenceSchema:
     return QaReferenceSchema(
         rank=rank,
         segment_id=str(getattr(item, "segment_id", "") or "") or None,
         document_id=str(getattr(item, "document_id", "") or "") or None,
+        document_file_name=document_file_name,
         heading_path=getattr(item, "heading_path", "") or "",
         excerpt=(getattr(item, "clean_text", "") or "")[:500],
         vector_score=getattr(item, "vector_score", None),

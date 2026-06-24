@@ -33,6 +33,7 @@ class QaReferenceSchema(BaseModel):
     rank: int
     segment_id: str | None
     document_id: str | None
+    document_file_name: str | None = None
     heading_path: str
     excerpt: str
     vector_score: float | None
