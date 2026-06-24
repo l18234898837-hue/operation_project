@@ -6,6 +6,7 @@ import json
 import re
 from typing import Any, Protocol
 
+from app.prompts.qa_prompts import build_intent_messages
 from app.services.keyword_index import normalize_query
 
 
@@ -155,7 +156,7 @@ async def understand_query(
     normalized = normalize_query(question)
     try:
         content = await chat_client.chat(
-            messages=_build_intent_messages(normalized),
+            messages=build_intent_messages(normalized),
             temperature=0.1,
         )
         model_result = _parse_model_result(content, fallback_question=normalized)

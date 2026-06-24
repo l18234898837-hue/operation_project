@@ -310,9 +310,48 @@ class QaRecord(TimestampMixin, Base):
         back_populates="record",
         cascade="all, delete-orphan",
     )
+    trace_steps: Mapped[list[QaTraceStep]] = relationship(
+        back_populates="record",
+        cascade="all, delete-orphan",
+    )
     unanswered_item: Mapped[QaUnanswered | None] = relationship(
         back_populates="record",
     )
+
+
+class QaTraceStep(TimestampMixin, Base):
+    __tablename__ = "qa_trace_step"
+    __table_args__ = (
+        Index("ix_qa_trace_step_qa_record_id", "qa_record_id"),
+        Index("ix_qa_trace_step_trace_id", "trace_id"),
+        Index("ix_qa_trace_step_step_name", "step_name"),
+        Index("ix_qa_trace_step_status", "status"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    qa_record_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("qa_record.id", ondelete="CASCADE"),
+    )
+    trace_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    step_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    duration_ms: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        default="success",
+        server_default="success",
+    )
+    model_name: Mapped[str | None] = mapped_column(String(255))
+    input_tokens: Mapped[int | None] = mapped_column(Integer)
+    output_tokens: Mapped[int | None] = mapped_column(Integer)
+    error_message: Mapped[str | None] = mapped_column(Text)
+    step_metadata: Mapped[dict | None] = mapped_column("metadata", JSONB)
+
+    record: Mapped[QaRecord | None] = relationship(back_populates="trace_steps")
 
 
 class QaReference(TimestampMixin, Base):

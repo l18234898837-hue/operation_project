@@ -2,7 +2,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.services.answer_generation import generate_general_answer, generate_rag_answer
+from app.services.answer_generation import (
+    generate_general_answer,
+    generate_rag_answer,
+    stream_rag_answer,
+)
 
 
 class FakeChatClient:
@@ -13,6 +17,11 @@ class FakeChatClient:
     async def chat(self, messages, temperature=0.1):
         self.calls.append({"messages": messages, "temperature": temperature})
         return self.response
+
+    async def chat_stream(self, messages, temperature=0.1):
+        self.calls.append({"messages": messages, "temperature": temperature})
+        yield "第一段"
+        yield "第二段"
 
 
 @pytest.mark.asyncio
@@ -79,3 +88,31 @@ async def test_generate_general_answer_marks_no_knowledge_base_use():
     assert client.calls[0]["temperature"] == 0.1
     system_prompt = client.calls[0]["messages"][0]["content"]
     assert "不引用项目知识库" in system_prompt
+
+
+@pytest.mark.asyncio
+async def test_stream_rag_answer_yields_chunks_with_rag_prompt():
+    evidence = [
+        SimpleNamespace(
+            heading_path="03_线缆接头与绝缘故障 > 4. 绝缘阻抗问题",
+            clean_text="绝缘阻抗低可能与直流线缆破皮有关。",
+            rerank_score=0.85,
+        )
+    ]
+    client = FakeChatClient("unused")
+
+    chunks = [
+        chunk
+        async for chunk in stream_rag_answer(
+            chat_client=client,
+            question="逆变器绝缘阻抗低怎么排查？",
+            evidence=evidence,
+            cautious=False,
+        )
+    ]
+
+    assert chunks == ["第一段", "第二段"]
+    assert client.calls[0]["temperature"] == 0.1
+    joined = "\n".join(message["content"] for message in client.calls[0]["messages"])
+    assert "只能基于给定证据回答" in joined
+    assert "绝缘阻抗低可能与直流线缆破皮有关" in joined

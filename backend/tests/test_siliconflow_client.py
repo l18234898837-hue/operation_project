@@ -208,6 +208,48 @@ async def test_chat_client_sends_openai_compatible_payload_and_returns_text():
 
 
 @pytest.mark.asyncio
+async def test_chat_stream_yields_content_chunks_and_sends_stream_payload():
+    captured: dict[str, object] = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["headers"] = dict(request.headers)
+        captured["json"] = json.loads(request.content.decode("utf-8"))
+        return httpx.Response(
+            200,
+            text=(
+                'data: {"choices":[{"delta":{"content":"第一段"}}]}\n\n'
+                'data: {"choices":[{"delta":{"content":"第二段"}}]}\n\n'
+                "data: [DONE]\n\n"
+            ),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://api.siliconflow.cn/v1",
+    ) as http_client:
+        client = SiliconFlowChatClient(
+            client=http_client,
+            api_key="test-key",
+            model="deepseek-ai/DeepSeek-V4-Flash",
+        )
+        chunks = [
+            chunk
+            async for chunk in client.chat_stream(
+                messages=[{"role": "user", "content": "Hello"}],
+                temperature=0.1,
+            )
+        ]
+
+    assert chunks == ["第一段", "第二段"]
+    assert str(captured["url"]).endswith("/chat/completions")
+    assert captured["headers"]["authorization"] == "Bearer test-key"
+    assert captured["json"]["stream"] is True
+    assert captured["json"]["model"] == "deepseek-ai/DeepSeek-V4-Flash"
+
+
+@pytest.mark.asyncio
 async def test_http_4xx_raises_http_status_error():
     async def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(401, request=request, json={"message": "unauthorized"})

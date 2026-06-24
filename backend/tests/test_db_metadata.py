@@ -21,8 +21,21 @@ def test_rag_tables_are_registered():
         "qa_record",
         "qa_reference",
         "qa_unanswered",
+        "qa_trace_step",
     }
     assert expected.issubset(set(Base.metadata.tables))
+
+
+def test_qa_trace_step_table_is_registered():
+    table = Base.metadata.tables["qa_trace_step"]
+
+    assert "qa_record_id" in table.c
+    assert "trace_id" in table.c
+    assert "step_name" in table.c
+    assert "duration_ms" in table.c
+    assert "status" in table.c
+    assert "model_name" in table.c
+    assert "metadata" in table.c
 
 
 def test_segment_embedding_dimension_is_1024():
@@ -70,6 +83,15 @@ def test_rag_spec_critical_columns_are_registered():
         },
         "qa_reference": {"qa_record_id", "rank", "ref_metadata"},
         "qa_unanswered": {"normalized_question", "reason", "resolved_note"},
+        "qa_trace_step": {
+            "qa_record_id",
+            "trace_id",
+            "step_name",
+            "duration_ms",
+            "status",
+            "model_name",
+            "metadata",
+        },
     }
 
     for table_name, columns in expected_columns.items():

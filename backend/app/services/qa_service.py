@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 import time
 from typing import Protocol
 import uuid
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models.rag import (
@@ -15,7 +17,23 @@ from app.models.rag import (
     QaUnanswered,
 )
 from app.schemas.qa import QaAskResponse, QaReferenceSchema
+from app.services.conversation_context import (
+    ConversationContext,
+    build_conversation_context,
+)
+from app.services.conversation_rewrite import StandaloneQuestionResult
+from app.services.evidence_filtering import (
+    filter_evidence_for_answer,
+    filter_references_for_response,
+)
+from app.services.qa_error_handling import classify_qa_exception
+from app.services.qa_trace import (
+    QaTraceCollector,
+    persist_trace_steps,
+)
 from app.services.query_understanding import Intent, QueryUnderstandingResult
+
+logger = logging.getLogger(__name__)
 
 
 class UnderstandingClient(Protocol):
@@ -41,11 +59,31 @@ class AnswerClient(Protocol):
         ...
 
 
+class ContextRewriter(Protocol):
+    async def rewrite(
+        self,
+        question: str,
+        context: ConversationContext,
+    ) -> StandaloneQuestionResult:
+        ...
+
+
+class SessionSummarizer(Protocol):
+    async def update_if_needed(
+        self,
+        qa_session: QaSession,
+        records: list[QaRecord],
+    ) -> bool:
+        ...
+
+
 @dataclass(frozen=True)
 class QaDependencies:
     understanding_client: UnderstandingClient
     retriever: Retriever
     answer_client: AnswerClient
+    context_rewriter: ContextRewriter | None = None
+    session_summarizer: SessionSummarizer | None = None
 
 
 async def answer_question(
@@ -56,11 +94,159 @@ async def answer_question(
     strong_rerank_score: float,
     reference_top_k: int,
     session_id: str | uuid.UUID | None = None,
+    history_turns: int = 10,
+    context_max_chars: int = 8000,
+    answer_excerpt_chars: int = 500,
+    qa_evidence_min_score: float = 0.3,
+    qa_reference_min_score: float = 0.3,
+    qa_reference_visible_top_k: int = 3,
+    qa_reference_max_top_k: int = 5,
 ) -> QaAskResponse:
     start = time.perf_counter()
     trace_id = uuid.uuid4().hex
-    qa_session = _get_or_create_session(session, session_id)
-    understanding = await dependencies.understanding_client.understand(question)
+    trace = QaTraceCollector(trace_id=trace_id)
+    timings: dict[str, int] = {}
+    qa_session: QaSession | None = None
+    try:
+        step_start = time.perf_counter()
+        qa_session = _get_or_create_session(session, session_id)
+        _record_timing(timings, trace, "get_or_create_session", step_start)
+        return await _answer_question_inner(
+            session=session,
+            qa_session=qa_session,
+            question=question,
+            dependencies=dependencies,
+            min_rerank_score=min_rerank_score,
+            strong_rerank_score=strong_rerank_score,
+            reference_top_k=reference_top_k,
+            history_turns=history_turns,
+            context_max_chars=context_max_chars,
+            answer_excerpt_chars=answer_excerpt_chars,
+            qa_evidence_min_score=qa_evidence_min_score,
+            qa_reference_min_score=qa_reference_min_score,
+            qa_reference_visible_top_k=qa_reference_visible_top_k,
+            qa_reference_max_top_k=qa_reference_max_top_k,
+            trace_id=trace_id,
+            trace=trace,
+            start=start,
+            timings=timings,
+        )
+    except Exception as exc:
+        step_start = time.perf_counter()
+        session.rollback()
+        _record_timing(timings, trace, "rollback", step_start)
+        fallback_session_id = session_id or getattr(qa_session, "id", None)
+        step_start = time.perf_counter()
+        qa_session = _get_or_create_session(session, fallback_session_id)
+        _record_timing(timings, trace, "fallback_session", step_start)
+        decision = classify_qa_exception(exc)
+        understanding = QueryUnderstandingResult(
+            intent=Intent.out_of_scope,
+            confidence=0.0,
+            should_use_knowledge_base=False,
+            normalized_question=question,
+            search_query="",
+            refusal_reason=decision.reason,
+            reason=decision.reason,
+        )
+        record = _add_record(
+            session=session,
+            qa_session=qa_session,
+            trace_id=trace_id,
+            question=question,
+            understanding=understanding,
+            answer=decision.user_message,
+            answer_type=AnswerType.refused,
+            confidence=None,
+            latency_ms=_latency_ms(start),
+            decision_extra={
+                "route": "refused",
+                "used_knowledge_base": False,
+                "refusal_reason": decision.reason,
+                "error_status_code": decision.status_code,
+                "timings_ms": _timings_snapshot(start, timings),
+            },
+        )
+        trace.record_step(
+            step_name="qa_exception",
+            duration_ms=_latency_ms(start),
+            status="failed",
+            error_message=str(exc)[:1000],
+            metadata={"reason": decision.reason},
+        )
+        if decision.should_record_unanswered:
+            _add_unanswered(
+                session=session,
+                qa_session=qa_session,
+                record=record,
+                question=question,
+                understanding=understanding,
+                reason=decision.reason,
+            )
+        trace.record_step(
+            step_name="db_commit",
+            duration_ms=0,
+            metadata={"route": "refused"},
+        )
+        persist_trace_steps(session=session, record_id=record.id, collector=trace)
+        step_start = time.perf_counter()
+        session.commit()
+        timings["db_commit_ms"] = _elapsed_ms(step_start)
+        _log_timing(
+            trace_id=trace_id,
+            session_id=qa_session.id,
+            route="refused",
+            timings=timings,
+            error_reason=decision.reason,
+        )
+        return _response_from_record(record, understanding.intent.value, [])
+
+
+async def _answer_question_inner(
+    session: Session,
+    qa_session: QaSession,
+    question: str,
+    dependencies: QaDependencies,
+    min_rerank_score: float,
+    strong_rerank_score: float,
+    reference_top_k: int,
+    history_turns: int,
+    context_max_chars: int,
+    answer_excerpt_chars: int,
+    qa_evidence_min_score: float,
+    qa_reference_min_score: float,
+    qa_reference_visible_top_k: int,
+    qa_reference_max_top_k: int,
+    trace_id: str,
+    trace: QaTraceCollector,
+    start: float,
+    timings: dict[str, int],
+) -> QaAskResponse:
+    step_start = time.perf_counter()
+    previous_records = _list_session_records(session, qa_session.id)
+    _record_timing(timings, trace, "load_history", step_start)
+
+    step_start = time.perf_counter()
+    context = build_conversation_context(
+        records=previous_records,
+        session_metadata=qa_session.session_metadata,
+        history_turns=history_turns,
+        answer_excerpt_chars=answer_excerpt_chars,
+        max_chars=context_max_chars,
+    )
+    _record_timing(timings, trace, "build_context", step_start)
+
+    step_start = time.perf_counter()
+    rewrite_result = await _rewrite_question(question, context, dependencies)
+    _record_timing(timings, trace, "rewrite_question", step_start)
+    question_for_understanding = rewrite_result.standalone_question
+
+    step_start = time.perf_counter()
+    understanding = await dependencies.understanding_client.understand(
+        question_for_understanding
+    )
+    _record_timing(timings, trace, "understand_intent", step_start)
+    rewrite_metadata = _rewrite_metadata(question, rewrite_result)
 
     if understanding.intent in _REFUSED_INTENTS:
         reason = understanding.refusal_reason or understanding.intent.value
@@ -76,9 +262,11 @@ async def answer_question(
             confidence=understanding.confidence,
             latency_ms=_latency_ms(start),
             decision_extra={
+                **rewrite_metadata,
                 "route": "refused",
                 "used_knowledge_base": False,
                 "refusal_reason": reason,
+                "timings_ms": _timings_snapshot(start, timings),
             },
         )
         _add_unanswered(
@@ -89,16 +277,30 @@ async def answer_question(
             understanding=understanding,
             reason=reason,
         )
-        session.commit()
-        return _response_from_record(record, understanding.intent.value, [])
+        return await _finalize_response(
+            session=session,
+            dependencies=dependencies,
+            qa_session=qa_session,
+            records=[*previous_records, record],
+            record=record,
+            intent=understanding.intent.value,
+            references=[],
+            trace_id=trace_id,
+            trace=trace,
+            start=start,
+            timings=timings,
+            route="refused",
+        )
 
     if (
         understanding.intent == Intent.general_explanation
         and not understanding.should_use_knowledge_base
     ):
+        step_start = time.perf_counter()
         answer = await dependencies.answer_client.generate_general(
             understanding.normalized_question
         )
+        _record_timing(timings, trace, "answer_generation", step_start)
         record = _add_record(
             session=session,
             qa_session=qa_session,
@@ -110,16 +312,32 @@ async def answer_question(
             confidence=understanding.confidence,
             latency_ms=_latency_ms(start),
             decision_extra={
+                **rewrite_metadata,
                 "route": "general_llm",
                 "used_knowledge_base": False,
                 "refusal_reason": None,
+                "timings_ms": _timings_snapshot(start, timings),
             },
         )
-        session.commit()
-        return _response_from_record(record, understanding.intent.value, [])
+        return await _finalize_response(
+            session=session,
+            dependencies=dependencies,
+            qa_session=qa_session,
+            records=[*previous_records, record],
+            record=record,
+            intent=understanding.intent.value,
+            references=[],
+            trace_id=trace_id,
+            trace=trace,
+            start=start,
+            timings=timings,
+            route="general_llm",
+        )
 
     search_query = understanding.search_query or understanding.normalized_question
+    step_start = time.perf_counter()
     evidence = await dependencies.retriever.retrieve(search_query)
+    _record_timing(timings, trace, "retrieve_evidence", step_start)
     top_score = _top_rerank_score(evidence)
 
     if top_score is None or top_score < min_rerank_score:
@@ -135,11 +353,13 @@ async def answer_question(
             confidence=top_score,
             latency_ms=_latency_ms(start),
             decision_extra={
+                **rewrite_metadata,
                 "route": "refused",
                 "used_knowledge_base": True,
                 "refusal_reason": "low_confidence",
                 "top1_rerank_score": top_score,
                 "threshold": min_rerank_score,
+                "timings_ms": _timings_snapshot(start, timings),
             },
         )
         _add_unanswered(
@@ -150,16 +370,88 @@ async def answer_question(
             understanding=understanding,
             reason="low_confidence",
         )
-        session.commit()
-        return _response_from_record(record, understanding.intent.value, [])
+        return await _finalize_response(
+            session=session,
+            dependencies=dependencies,
+            qa_session=qa_session,
+            records=[*previous_records, record],
+            record=record,
+            intent=understanding.intent.value,
+            references=[],
+            trace_id=trace_id,
+            trace=trace,
+            start=start,
+            timings=timings,
+            route="refused",
+        )
 
-    evidence_for_answer = evidence[:reference_top_k]
+    step_start = time.perf_counter()
+    evidence_for_answer = filter_evidence_for_answer(
+        evidence=evidence,
+        min_rerank_score=qa_evidence_min_score,
+        max_items=qa_reference_visible_top_k,
+    )
+    evidence_for_response = filter_references_for_response(
+        evidence=evidence,
+        min_rerank_score=qa_reference_min_score,
+        max_items=qa_reference_max_top_k,
+    )
+    _record_timing(timings, trace, "filter_evidence", step_start)
+    if not evidence_for_answer:
+        answer = "当前知识库检索结果未达到进入答案生成的证据阈值，暂时无法可靠回答该问题。"
+        record = _add_record(
+            session=session,
+            qa_session=qa_session,
+            trace_id=trace_id,
+            question=question,
+            understanding=understanding,
+            answer=answer,
+            answer_type=AnswerType.refused,
+            confidence=top_score,
+            latency_ms=_latency_ms(start),
+            decision_extra={
+                **rewrite_metadata,
+                "route": "refused",
+                "used_knowledge_base": True,
+                "refusal_reason": "no_evidence_after_filtering",
+                "top1_rerank_score": top_score,
+                "threshold": min_rerank_score,
+                "timings_ms": _timings_snapshot(start, timings),
+            },
+        )
+        _add_unanswered(
+            session=session,
+            qa_session=qa_session,
+            record=record,
+            question=question,
+            understanding=understanding,
+            reason="no_evidence_after_filtering",
+        )
+        return await _finalize_response(
+            session=session,
+            dependencies=dependencies,
+            qa_session=qa_session,
+            records=[*previous_records, record],
+            record=record,
+            intent=understanding.intent.value,
+            references=[],
+            trace_id=trace_id,
+            trace=trace,
+            start=start,
+            timings=timings,
+            route="refused",
+        )
+
     cautious = top_score < strong_rerank_score
+    step_start = time.perf_counter()
     answer = await dependencies.answer_client.generate_rag(
         question=understanding.normalized_question,
         evidence=evidence_for_answer,
         cautious=cautious,
     )
+    _record_timing(timings, trace, "answer_generation", step_start)
+
+    step_start = time.perf_counter()
     record = _add_record(
         session=session,
         qa_session=qa_session,
@@ -171,17 +463,43 @@ async def answer_question(
         confidence=top_score,
         latency_ms=_latency_ms(start),
         decision_extra={
+            **rewrite_metadata,
             "route": "rag",
             "used_knowledge_base": True,
             "refusal_reason": None,
             "top1_rerank_score": top_score,
             "threshold": min_rerank_score,
+            "evidence_min_score": qa_evidence_min_score,
+            "reference_min_score": qa_reference_min_score,
+            "reference_visible_top_k": qa_reference_visible_top_k,
+            "reference_max_top_k": qa_reference_max_top_k,
             "cautious": cautious,
+            "evidence_for_answer_count": len(evidence_for_answer),
+            "reference_count": len(evidence_for_response),
+            "timings_ms": _timings_snapshot(start, timings),
         },
     )
-    references = _add_references(session, record, evidence_for_answer)
-    session.commit()
-    return _response_from_record(record, understanding.intent.value, references)
+    references = _add_references(
+        session,
+        record,
+        evidence_for_response,
+        visible_top_k=qa_reference_visible_top_k,
+    )
+    _record_timing(timings, trace, "db_write_record", step_start)
+    return await _finalize_response(
+        session=session,
+        dependencies=dependencies,
+        qa_session=qa_session,
+        records=[*previous_records, record],
+        record=record,
+        intent=understanding.intent.value,
+        references=references,
+        trace_id=trace_id,
+        trace=trace,
+        start=start,
+        timings=timings,
+        route="rag",
+    )
 
 
 def _get_or_create_session(
@@ -190,9 +508,9 @@ def _get_or_create_session(
 ) -> QaSession:
     if session_id:
         session_uuid = (
-            session_id if isinstance(session_id, uuid.UUID) else uuid.UUID(session_id)
+            session_id if isinstance(session_id, uuid.UUID) else uuid.UUID(str(session_id))
         )
-        existing = session.get(QaSession, session_uuid)
+        existing = session.get(QaSession, session_uuid) if hasattr(session, "get") else None
         if existing is not None:
             return existing
         qa_session = QaSession(id=session_uuid)
@@ -201,6 +519,120 @@ def _get_or_create_session(
     session.add(qa_session)
     session.flush()
     return qa_session
+
+
+def _list_session_records(session: Session, session_id: uuid.UUID) -> list[QaRecord]:
+    if hasattr(session, "execute"):
+        result = session.execute(
+            select(QaRecord)
+            .where(QaRecord.session_id == session_id)
+            .order_by(QaRecord.created_at.asc(), QaRecord.id.asc())
+        )
+        return list(result.scalars().all())
+
+    added = getattr(session, "added", [])
+    return [
+        item
+        for item in added
+        if isinstance(item, QaRecord) and item.session_id == session_id
+    ]
+
+
+async def _rewrite_question(
+    question: str,
+    context: ConversationContext,
+    dependencies: QaDependencies,
+) -> StandaloneQuestionResult:
+    if dependencies.context_rewriter is None:
+        return StandaloneQuestionResult(
+            standalone_question=question,
+            is_follow_up=False,
+            used_history=False,
+            reason="rewriter_disabled",
+        )
+    return await dependencies.context_rewriter.rewrite(question, context)
+
+
+def _rewrite_metadata(
+    question: str,
+    rewrite_result: StandaloneQuestionResult,
+) -> dict[str, object]:
+    return {
+        "original_question": question,
+        "standalone_question": rewrite_result.standalone_question,
+        "is_follow_up": rewrite_result.is_follow_up,
+        "used_history": rewrite_result.used_history,
+        "rewrite_reason": rewrite_result.reason,
+    }
+
+
+async def _finalize_response(
+    session: Session,
+    dependencies: QaDependencies,
+    qa_session: QaSession,
+    records: list[QaRecord],
+    record: QaRecord,
+    intent: str,
+    references: list[QaReferenceSchema],
+    trace_id: str,
+    trace: QaTraceCollector,
+    start: float,
+    timings: dict[str, int],
+    route: str,
+) -> QaAskResponse:
+    step_start = time.perf_counter()
+    await _maybe_update_summary(
+        dependencies=dependencies,
+        qa_session=qa_session,
+        records=records,
+        record=record,
+    )
+    _record_timing(timings, trace, "summary_update", step_start)
+
+    trace.record_step(
+        step_name="db_commit",
+        duration_ms=0,
+        metadata={"route": route},
+    )
+    persist_trace_steps(session=session, record_id=record.id, collector=trace)
+    step_start = time.perf_counter()
+    session.commit()
+    timings["db_commit_ms"] = _elapsed_ms(step_start)
+
+    timings["total_ms"] = _latency_ms(start)
+    metadata = dict(record.decision_metadata or {})
+    metadata["timings_ms"] = dict(timings)
+    record.decision_metadata = metadata
+    _log_timing(
+        trace_id=trace_id,
+        session_id=qa_session.id,
+        route=route,
+        timings=timings,
+    )
+    return _response_from_record(record, intent, references)
+
+
+async def _maybe_update_summary(
+    dependencies: QaDependencies,
+    qa_session: QaSession,
+    records: list[QaRecord],
+    record: QaRecord,
+) -> None:
+    if dependencies.session_summarizer is None:
+        return
+    try:
+        updated = await dependencies.session_summarizer.update_if_needed(
+            qa_session=qa_session,
+            records=records,
+        )
+    except Exception:
+        metadata = dict(record.decision_metadata or {})
+        metadata["summary_update_error"] = True
+        record.decision_metadata = metadata
+        return
+    metadata = dict(record.decision_metadata or {})
+    metadata["summary_updated"] = updated
+    record.decision_metadata = metadata
 
 
 def _add_record(
@@ -245,6 +677,7 @@ def _add_references(
     session: Session,
     record: QaRecord,
     evidence: list[object],
+    visible_top_k: int,
 ) -> list[QaReferenceSchema]:
     references: list[QaReferenceSchema] = []
     for rank, item in enumerate(evidence, start=1):
@@ -261,7 +694,7 @@ def _add_references(
             ref_metadata={"heading_path": getattr(item, "heading_path", "") or ""},
         )
         session.add(reference)
-        references.append(_reference_schema(rank, item))
+        references.append(_reference_schema(rank, item, visible=rank <= visible_top_k))
     return references
 
 
@@ -290,6 +723,7 @@ def _response_from_record(
     references: list[QaReferenceSchema],
 ) -> QaAskResponse:
     return QaAskResponse(
+        session_id=record.session_id,
         trace_id=record.trace_id or "",
         answer_type=record.answer_type.value,
         intent=intent,
@@ -300,7 +734,7 @@ def _response_from_record(
     )
 
 
-def _reference_schema(rank: int, item: object) -> QaReferenceSchema:
+def _reference_schema(rank: int, item: object, visible: bool = True) -> QaReferenceSchema:
     return QaReferenceSchema(
         rank=rank,
         segment_id=str(getattr(item, "segment_id", "") or "") or None,
@@ -311,6 +745,7 @@ def _reference_schema(rank: int, item: object) -> QaReferenceSchema:
         keyword_score=getattr(item, "keyword_score", None),
         rrf_score=getattr(item, "rrf_score", None),
         rerank_score=getattr(item, "rerank_score", None),
+        visible=visible,
     )
 
 
@@ -323,6 +758,45 @@ def _top_rerank_score(evidence: list[object]) -> float | None:
 
 def _latency_ms(start: float) -> int:
     return int((time.perf_counter() - start) * 1000)
+
+
+def _elapsed_ms(start: float) -> int:
+    return int((time.perf_counter() - start) * 1000)
+
+
+def _record_timing(
+    timings: dict[str, int],
+    trace: QaTraceCollector,
+    step_name: str,
+    start: float,
+) -> int:
+    duration_ms = _elapsed_ms(start)
+    timings[f"{step_name}_ms"] = duration_ms
+    trace.record_step(step_name=step_name, duration_ms=duration_ms)
+    return duration_ms
+
+
+def _timings_snapshot(start: float, timings: dict[str, int]) -> dict[str, int]:
+    snapshot = dict(timings)
+    snapshot["total_ms"] = _latency_ms(start)
+    return snapshot
+
+
+def _log_timing(
+    trace_id: str,
+    session_id: uuid.UUID,
+    route: str,
+    timings: dict[str, int],
+    error_reason: str | None = None,
+) -> None:
+    logger.info(
+        "qa_timing trace_id=%s session_id=%s route=%s error_reason=%s timings_ms=%s",
+        trace_id,
+        session_id,
+        route,
+        error_reason,
+        dict(timings),
+    )
 
 
 def _uuid_or_none(value: object) -> uuid.UUID | None:

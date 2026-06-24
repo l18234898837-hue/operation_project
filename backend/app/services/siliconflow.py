@@ -1,4 +1,6 @@
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
+import json
 
 import httpx
 
@@ -120,6 +122,35 @@ class SiliconFlowChatClient:
         )
         response.raise_for_status()
         return response.json()["choices"][0]["message"]["content"]
+
+    async def chat_stream(
+        self,
+        messages: list[dict[str, str]],
+        temperature: float = 0.1,
+    ) -> AsyncIterator[str]:
+        async with self._client.stream(
+            "POST",
+            "/chat/completions",
+            headers=self._headers(),
+            json={
+                "model": self._model,
+                "messages": messages,
+                "temperature": temperature,
+                "stream": True,
+            },
+        ) as response:
+            response.raise_for_status()
+            async for line in response.aiter_lines():
+                if not line.startswith("data:"):
+                    continue
+                payload = line.removeprefix("data:").strip()
+                if payload == "[DONE]":
+                    break
+                data = json.loads(payload)
+                delta = data["choices"][0].get("delta") or {}
+                content = delta.get("content")
+                if content:
+                    yield content
 
     def _headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self._api_key}"}

@@ -3,10 +3,20 @@ from __future__ import annotations
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.services.answer_generation import generate_general_answer, generate_rag_answer
+from app.services.answer_generation import (
+    generate_general_answer,
+    generate_rag_answer,
+    stream_rag_answer,
+)
+from app.services.conversation_context import ConversationContext
+from app.services.conversation_rewrite import (
+    StandaloneQuestionResult,
+    rewrite_standalone_question,
+)
 from app.services.qa_service import QaDependencies
 from app.services.query_understanding import QueryUnderstandingResult, understand_query
 from app.services.retrieval import retrieve_evidence
+from app.services.session_summary import update_session_summary_if_needed
 from app.services.siliconflow import (
     SiliconFlowChatClient,
     SiliconFlowEmbeddingClient,
@@ -79,6 +89,63 @@ class RealAnswerClient:
             question=question,
         )
 
+    async def stream_rag(
+        self,
+        question: str,
+        evidence: list[object],
+        cautious: bool,
+    ):
+        async for chunk in stream_rag_answer(
+            chat_client=self._chat_client,
+            question=question,
+            evidence=evidence,
+            cautious=cautious,
+        ):
+            yield chunk
+
+
+class RealContextRewriter:
+    def __init__(self, chat_client: SiliconFlowChatClient) -> None:
+        self._chat_client = chat_client
+
+    async def rewrite(
+        self,
+        question: str,
+        context: ConversationContext,
+    ) -> StandaloneQuestionResult:
+        return await rewrite_standalone_question(
+            question=question,
+            context=context,
+            chat_client=self._chat_client,
+        )
+
+
+class RealSessionSummarizer:
+    def __init__(
+        self,
+        chat_client: SiliconFlowChatClient,
+        summary_after_turns: int,
+        summary_refresh_turns: int,
+        history_turns: int,
+        answer_excerpt_chars: int,
+    ) -> None:
+        self._chat_client = chat_client
+        self._summary_after_turns = summary_after_turns
+        self._summary_refresh_turns = summary_refresh_turns
+        self._history_turns = history_turns
+        self._answer_excerpt_chars = answer_excerpt_chars
+
+    async def update_if_needed(self, qa_session, records) -> bool:
+        return await update_session_summary_if_needed(
+            qa_session=qa_session,
+            records=records,
+            chat_client=self._chat_client,
+            summary_after_turns=self._summary_after_turns,
+            summary_refresh_turns=self._summary_refresh_turns,
+            history_turns=self._history_turns,
+            answer_excerpt_chars=self._answer_excerpt_chars,
+        )
+
 
 def build_qa_dependencies(
     session: Session,
@@ -98,4 +165,12 @@ def build_qa_dependencies(
             rerank_client=rerank_client,
         ),
         answer_client=RealAnswerClient(answer_chat_client),
+        context_rewriter=RealContextRewriter(intent_chat_client),
+        session_summarizer=RealSessionSummarizer(
+            chat_client=answer_chat_client,
+            summary_after_turns=settings.conversation_summary_after_turns,
+            summary_refresh_turns=settings.conversation_summary_refresh_turns,
+            history_turns=settings.conversation_history_turns,
+            answer_excerpt_chars=settings.conversation_answer_excerpt_chars,
+        ),
     )

@@ -61,6 +61,42 @@ def test_settings_reads_qa_routing_configuration():
     assert settings.model_api_timeout_seconds == 240
 
 
+def test_settings_reads_multi_turn_conversation_configuration():
+    settings = Settings(
+        conversation_history_turns="10",
+        conversation_summary_after_turns="10",
+        conversation_summary_refresh_turns="5",
+        conversation_context_max_chars="8000",
+        conversation_answer_excerpt_chars="500",
+    )
+
+    assert settings.conversation_history_turns == 10
+    assert settings.conversation_summary_after_turns == 10
+    assert settings.conversation_summary_refresh_turns == 5
+    assert settings.conversation_context_max_chars == 8000
+    assert settings.conversation_answer_excerpt_chars == 500
+
+
+def test_settings_reads_reference_filtering_configuration():
+    settings = Settings(
+        qa_evidence_min_score="0.3",
+        qa_reference_min_score="0.3",
+        qa_reference_visible_top_k="3",
+        qa_reference_max_top_k="5",
+    )
+
+    assert settings.qa_evidence_min_score == 0.3
+    assert settings.qa_reference_min_score == 0.3
+    assert settings.qa_reference_visible_top_k == 3
+    assert settings.qa_reference_max_top_k == 5
+
+
+def test_normalize_env_file_script_imports_safely_without_executing_main():
+    import backend.scripts.normalize_env_file as normalize_script
+
+    assert hasattr(normalize_script, "main")
+
+
 def test_database_url_escapes_special_characters_in_password():
     settings = Settings(
         db_user="postgres",

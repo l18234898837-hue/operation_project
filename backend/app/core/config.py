@@ -57,6 +57,16 @@ class Settings(BaseSettings):
     qa_reference_top_k: int = 5
     qa_intent_model: str = "deepseek-ai/DeepSeek-V4-Flash"
     qa_chat_model: str = "deepseek-ai/DeepSeek-V4-Flash"
+    qa_evidence_min_score: float = 0.3
+    qa_reference_min_score: float = 0.3
+    qa_reference_visible_top_k: int = 3
+    qa_reference_max_top_k: int = 5
+
+    conversation_history_turns: int = 10
+    conversation_summary_after_turns: int = 10
+    conversation_summary_refresh_turns: int = 5
+    conversation_context_max_chars: int = 8000
+    conversation_answer_excerpt_chars: int = 500
 
     cors_origins: list[str] = Field(default_factory=lambda: ["http://127.0.0.1:5173", "http://localhost:5173"])
 

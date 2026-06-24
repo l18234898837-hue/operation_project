@@ -1,4 +1,5 @@
 import pytest
+import uuid
 from pydantic import ValidationError
 from fastapi.testclient import TestClient
 
@@ -23,7 +24,9 @@ def test_qa_request_rejects_invalid_session_id():
 
 
 def test_qa_response_allows_empty_references_for_general_llm():
+    session_id = uuid.uuid4()
     response = QaAskResponse(
+        session_id=session_id,
         trace_id="trace-1",
         answer_type="general_llm",
         intent="general_explanation",
@@ -38,12 +41,14 @@ def test_qa_response_allows_empty_references_for_general_llm():
     )
 
     assert response.references == []
+    assert response.session_id == session_id
     assert response.decision["used_knowledge_base"] is False
 
 
 @pytest.mark.parametrize("answer_type", ["rag", "general_llm", "refused", "none"])
 def test_qa_response_supports_answer_types(answer_type):
     response = QaAskResponse(
+        session_id=uuid.uuid4(),
         trace_id="trace-1",
         answer_type=answer_type,
         intent="knowledge_base_qa",
@@ -68,6 +73,7 @@ def test_qa_response_supports_answer_types(answer_type):
 )
 def test_qa_response_supports_intents(intent):
     response = QaAskResponse(
+        session_id=uuid.uuid4(),
         trace_id="trace-1",
         answer_type="none",
         intent=intent,
@@ -91,9 +97,11 @@ def test_qa_reference_schema_contains_scores():
         keyword_score=0.4,
         rrf_score=0.03,
         rerank_score=0.9,
+        visible=True,
     )
 
     assert reference.rerank_score == 0.9
+    assert reference.visible is True
 
 
 def test_qa_ask_endpoint_returns_response_with_references():
@@ -101,6 +109,7 @@ def test_qa_ask_endpoint_returns_response_with_references():
 
     async def fake_answer_question_dependency(request):
         return QaAskResponse(
+            session_id=uuid.uuid4(),
             trace_id="trace-1",
             answer_type="rag",
             intent="knowledge_base_qa",
@@ -139,6 +148,7 @@ def test_qa_ask_endpoint_returns_response_with_references():
     assert response.status_code == 200
     data = response.json()
     assert data["answer_type"] == "rag"
+    assert data["session_id"]
     assert data["references"][0]["heading_path"].startswith("03_线缆接头")
 
 
@@ -168,3 +178,52 @@ def test_ask_question_script_imports_safely_without_executing_main():
     import backend.scripts.ask_question as ask_script
 
     assert hasattr(ask_script, "main")
+
+
+def test_smoke_qa_script_imports_safely_without_executing_main():
+    import backend.scripts.smoke_qa as smoke_script
+
+    assert hasattr(smoke_script, "main")
+
+
+def test_smoke_multiturn_qa_script_imports_safely_without_executing_main():
+    import backend.scripts.smoke_multiturn_qa as smoke_script
+
+    assert hasattr(smoke_script, "main")
+
+
+def test_chat_qa_script_imports_safely_without_executing_main():
+    import backend.scripts.chat_qa as chat_script
+
+    assert hasattr(chat_script, "main")
+
+
+def test_stream_chat_qa_script_imports_safely_without_executing_main():
+    import backend.scripts.stream_chat_qa as stream_script
+
+    assert hasattr(stream_script, "main")
+
+
+def test_qa_stream_endpoint_returns_event_stream():
+    app = create_app()
+
+    async def fake_streamer(request):
+        yield 'event: status\ndata: {"stage":"retrieving"}\n\n'
+        yield 'event: done\ndata: {"answer_type":"rag"}\n\n'
+
+    from app.api.qa import get_qa_streamer
+
+    app.dependency_overrides[get_qa_streamer] = lambda: fake_streamer
+    client = TestClient(app)
+
+    with client.stream(
+        "POST",
+        "/api/qa/ask/stream",
+        json={"question": "逆变器绝缘阻抗低怎么排查？"},
+    ) as response:
+        body = response.read().decode("utf-8")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    assert "event: status" in body
+    assert "event: done" in body

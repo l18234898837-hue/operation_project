@@ -21,15 +21,7 @@ from app.services.siliconflow import (
 )
 
 
-async def main() -> None:
-    question = " ".join(sys.argv[1:]).strip()
-    if not question:
-        raise SystemExit(
-            "Usage: python scripts/ask_question.py <question> "
-            "(from backend) or python backend/scripts/ask_question.py <question> "
-            "(from project root)"
-        )
-
+async def ask_once(question: str, session_id=None):
     timeout = httpx.Timeout(settings.model_api_timeout_seconds)
     async with (
         httpx.AsyncClient(base_url=settings.llm_base_url, timeout=timeout) as llm_http,
@@ -70,9 +62,10 @@ async def main() -> None:
 
         try:
             with SessionLocal() as session:
-                response = await answer_question(
+                return await answer_question(
                     session=session,
                     question=question,
+                    session_id=session_id,
                     dependencies=build_qa_dependencies(
                         session=session,
                         intent_chat_client=intent_chat_client,
@@ -83,6 +76,13 @@ async def main() -> None:
                     min_rerank_score=settings.qa_rerank_min_score,
                     strong_rerank_score=settings.qa_rerank_strong_score,
                     reference_top_k=settings.qa_reference_top_k,
+                    history_turns=settings.conversation_history_turns,
+                    context_max_chars=settings.conversation_context_max_chars,
+                    answer_excerpt_chars=settings.conversation_answer_excerpt_chars,
+                    qa_evidence_min_score=settings.qa_evidence_min_score,
+                    qa_reference_min_score=settings.qa_reference_min_score,
+                    qa_reference_visible_top_k=settings.qa_reference_visible_top_k,
+                    qa_reference_max_top_k=settings.qa_reference_max_top_k,
                 )
         except httpx.TimeoutException as exc:
             raise SystemExit(
@@ -91,6 +91,17 @@ async def main() -> None:
                 "in .env."
             ) from exc
 
+
+async def main() -> None:
+    question = " ".join(sys.argv[1:]).strip()
+    if not question:
+        raise SystemExit(
+            "Usage: python scripts/ask_question.py <question> "
+            "(from backend) or python backend/scripts/ask_question.py <question> "
+            "(from project root)"
+        )
+
+    response = await ask_once(question)
     print(response.model_dump_json(indent=2))
 
 

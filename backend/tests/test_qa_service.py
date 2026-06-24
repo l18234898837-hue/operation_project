@@ -3,7 +3,14 @@ import uuid
 
 import pytest
 
-from app.models.rag import AnswerType, QaRecord, QaReference, QaSession, QaUnanswered
+from app.models.rag import (
+    AnswerType,
+    QaRecord,
+    QaReference,
+    QaSession,
+    QaTraceStep,
+    QaUnanswered,
+)
 from app.services.query_understanding import Intent, QueryUnderstandingResult
 from app.services.qa_service import QaDependencies, answer_question
 
@@ -133,6 +140,8 @@ async def test_answer_question_persists_rag_answer_reference_and_decision_metada
     assert response.decision["refusal_reason"] is None
     assert response.decision["top1_rerank_score"] == 0.8
     assert response.decision["threshold"] == 0.2
+    assert response.decision["timings_ms"]["total_ms"] >= 0
+    assert "retrieve_evidence_ms" in response.decision["timings_ms"]
     assert dependencies.retriever.calls == ["逆变器 绝缘阻抗低 排查"]
     assert dependencies.answer_client.rag_calls[0]["cautious"] is False
     assert any(isinstance(item, QaSession) for item in session.added)
@@ -140,6 +149,35 @@ async def test_answer_question_persists_rag_answer_reference_and_decision_metada
     assert records[0].session_id is not None
     assert any(isinstance(item, QaReference) for item in session.added)
     assert session.commits == 1
+
+
+@pytest.mark.asyncio
+async def test_answer_question_persists_trace_steps_for_rag_route():
+    session = FakeSession()
+    dependencies = make_dependencies(make_understanding(), make_evidence(score=0.8))
+
+    await answer_question(
+        session=session,
+        question="How should I troubleshoot low inverter insulation resistance?",
+        dependencies=dependencies,
+        min_rerank_score=0.2,
+        strong_rerank_score=0.6,
+        reference_top_k=5,
+    )
+
+    trace_steps = get_added(session, QaTraceStep)
+
+    assert {step.step_name for step in trace_steps} >= {
+        "load_history",
+        "rewrite_question",
+        "understand_intent",
+        "retrieve_evidence",
+        "answer_generation",
+        "summary_update",
+        "db_commit",
+    }
+    assert all(step.qa_record_id is not None for step in trace_steps)
+    assert all(step.trace_id for step in trace_steps)
 
 
 @pytest.mark.asyncio

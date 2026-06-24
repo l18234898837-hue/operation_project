@@ -39,9 +39,11 @@ class QaReferenceSchema(BaseModel):
     keyword_score: float | None
     rrf_score: float | None
     rerank_score: float | None
+    visible: bool = True
 
 
 class QaAskResponse(BaseModel):
+    session_id: uuid.UUID
     trace_id: str
     answer_type: AnswerTypeLiteral
     intent: IntentLiteral
