@@ -35,7 +35,8 @@ defineEmits<{
     </div>
 
     <FeedbackBar
-      v-if="message.role === 'assistant' && message.status !== 'streaming' && message.status !== 'error'"
+      v-if="message.role === 'assistant' && message.status !== 'streaming'"
+      :show-copy="message.status !== 'error'"
       @copy="$emit('copy', message.content)"
       @retry="$emit('retry')"
     />

@@ -860,12 +860,12 @@ def _document_file_names(session: Session, evidence: list[object]) -> dict[str, 
         return {}
 
     rows = session.execute(
-        select(KbDocument.id, KbDocument.file_name, KbDocument.title).where(KbDocument.id.in_(document_ids))
+        select(KbDocument.id, KbDocument.file_name).where(KbDocument.id.in_(document_ids))
     ).all()
     return {
-        str(document_id): file_name or title
-        for document_id, file_name, title in rows
-        if file_name or title
+        str(document_id): file_name
+        for document_id, file_name in rows
+        if file_name and file_name.strip()
     }
 
 

@@ -1,6 +1,12 @@
 <script setup lang="ts">
 import { CopyDocument, Refresh } from "@element-plus/icons-vue";
 
+withDefaults(defineProps<{
+  showCopy?: boolean;
+}>(), {
+  showCopy: true
+});
+
 defineEmits<{
   copy: [];
   retry: [];
@@ -9,7 +15,7 @@ defineEmits<{
 
 <template>
   <div class="answer-actions">
-    <button type="button" @click="$emit('copy')">
+    <button v-if="showCopy" type="button" @click="$emit('copy')">
       <CopyDocument aria-hidden="true" />
       复制
     </button>
