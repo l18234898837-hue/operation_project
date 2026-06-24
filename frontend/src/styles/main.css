@@ -907,10 +907,27 @@ a {
   padding: 22px 24px;
 }
 
+.chat-message.error .message-bubble {
+  border-color: rgba(240, 68, 56, 0.24);
+  color: var(--pv-danger);
+  background: rgba(240, 68, 56, 0.06);
+}
+
 .message-bubble p {
   margin: 0;
   line-height: 1.9;
   white-space: pre-wrap;
+}
+
+.stream-cursor {
+  display: inline-block;
+  width: 8px;
+  height: 1.25em;
+  margin-left: 3px;
+  vertical-align: -0.2em;
+  border-radius: 999px;
+  background: var(--pv-primary);
+  animation: stream-cursor-blink 1s steps(2, start) infinite;
 }
 
 .source-panel {
@@ -1098,6 +1115,18 @@ a {
 @keyframes pv-spin {
   to {
     transform: rotate(360deg);
+  }
+}
+
+@keyframes stream-cursor-blink {
+  0%,
+  45% {
+    opacity: 1;
+  }
+
+  46%,
+  100% {
+    opacity: 0;
   }
 }
 

@@ -20,7 +20,9 @@ defineEmits<{
       v-model="model"
       :disabled="disabled"
       rows="1"
+      aria-label="输入你的问题"
       placeholder="请输入你的问题，系统将基于知识库回答"
+      title="按 Enter 发送，按 Shift+Enter 换行"
       @keydown.enter.exact.prevent="$emit('send')"
     />
     <button :disabled="!canSend" type="submit">

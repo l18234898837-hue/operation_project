@@ -1,9 +1,8 @@
 <script setup lang="ts">
-import { Link, Loading, Refresh } from "@element-plus/icons-vue";
+import { Link } from "@element-plus/icons-vue";
 import { nextTick, ref, watch } from "vue";
 
 import logoUrl from "../../assets/logo-transparent.png";
-import { currentChatTime } from "../../stores/chat";
 import { formatConfidence } from "../../chat/qaPresentation";
 import { recommendedQuestions } from "../../chat/recommendedQuestions";
 import type { AnswerTypeDescription } from "../../chat/qaPresentation";
@@ -15,7 +14,7 @@ import RecommendedQuestions from "./RecommendedQuestions.vue";
 
 const question = defineModel<string>("question", { required: true });
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   pageTitle: string;
   messages: ChatMessage[];
   status: ChatStatus;
@@ -24,7 +23,10 @@ const props = defineProps<{
   canSend: boolean;
   copyMessage: string;
   errorMessage: string;
-}>();
+  streamStatusMessage?: string;
+}>(), {
+  streamStatusMessage: ""
+});
 
 const emit = defineEmits<{
   send: [];
@@ -78,29 +80,10 @@ watch(
           v-for="message in messages"
           :key="message.id"
           :message="message"
+          :status-text="streamStatusMessage"
           @copy="emit('copy', $event)"
           @retry="emit('retry')"
         />
-
-        <article v-if="status === 'asking'" class="chat-message assistant">
-          <time>{{ currentChatTime() }}</time>
-          <div class="message-bubble loading-bubble">
-            <Loading class="loading-icon" aria-hidden="true" />
-            正在检索知识库并生成回答...
-          </div>
-        </article>
-
-        <article v-if="status === 'error'" class="chat-message assistant">
-          <div class="message-bubble error-bubble">
-            <p>{{ errorMessage }}</p>
-          </div>
-          <div class="answer-actions">
-            <button type="button" @click="emit('retry')">
-              <Refresh aria-hidden="true" />
-              重试
-            </button>
-          </div>
-        </article>
       </template>
     </div>
 
@@ -108,9 +91,9 @@ watch(
 
     <ChatComposer
       v-model="question"
-      :disabled="status === 'asking'"
+      :disabled="status === 'asking' || status === 'streaming'"
       :can-send="canSend"
-      :sending="status === 'asking'"
+      :sending="status === 'asking' || status === 'streaming'"
       @send="emit('send')"
     />
   </section>
