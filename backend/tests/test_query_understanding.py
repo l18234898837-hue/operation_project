@@ -7,6 +7,7 @@ from app.services.query_understanding import (
     post_validate_understanding,
     understand_query,
 )
+from app.services.routing_terms import DOMAIN_TERMS, FAULT_ACTION_TERMS, REALTIME_TERMS
 
 
 def test_empty_question_is_invalid_input():
@@ -16,6 +17,12 @@ def test_empty_question_is_invalid_input():
     assert result.intent == Intent.invalid_input
     assert result.should_use_knowledge_base is False
     assert result.refusal_reason == "invalid_input"
+
+
+def test_routing_terms_are_maintained_separately():
+    assert "逆变器" in DOMAIN_TERMS
+    assert "报警" in FAULT_ACTION_TERMS
+    assert "天气" in REALTIME_TERMS
 
 
 def test_realtime_external_question_is_detected_before_llm():

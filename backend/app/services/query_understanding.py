@@ -8,6 +8,7 @@ from typing import Any, Protocol
 
 from app.prompts.qa_prompts import build_intent_messages
 from app.services.keyword_index import normalize_query
+from app.services.routing_terms import DOMAIN_TERMS, FAULT_ACTION_TERMS, REALTIME_TERMS
 
 
 class ChatClient(Protocol):
@@ -37,64 +38,6 @@ class QueryUnderstandingResult:
     refusal_reason: str | None
     reason: str
 
-
-DOMAIN_TERMS = (
-    "逆变器",
-    "组件",
-    "组串",
-    "SVG",
-    "无功",
-    "箱变",
-    "变压器",
-    "电缆",
-    "线缆",
-    "接头",
-    "绝缘",
-    "漏电流",
-    "发电量",
-    "巡检",
-    "热斑",
-    "PID",
-    "MPPT",
-    "并网",
-    "过压",
-    "欠压",
-)
-
-FAULT_ACTION_TERMS = (
-    "故障",
-    "报警",
-    "异常",
-    "排查",
-    "处理",
-    "维修",
-    "维护",
-    "巡检",
-    "跳闸",
-    "停机",
-    "不发电",
-    "发电少",
-    "效率低",
-    "过温",
-    "怎么",
-    "如何",
-    "该怎么",
-)
-
-REALTIME_TERMS = (
-    "今天",
-    "现在",
-    "实时",
-    "最新",
-    "当前",
-    "天气",
-    "股价",
-    "新闻",
-    "价格",
-    "汇率",
-    "几点",
-    "时间",
-)
 
 _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(?P<body>.*?)```", re.IGNORECASE | re.DOTALL)
 _MEANINGFUL_TEXT_RE = re.compile(r"[A-Za-z0-9\u4e00-\u9fff]")
