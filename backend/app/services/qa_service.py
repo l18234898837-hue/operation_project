@@ -860,13 +860,24 @@ def _document_file_names(session: Session, evidence: list[object]) -> dict[str, 
         return {}
 
     rows = session.execute(
-        select(KbDocument.id, KbDocument.file_name).where(KbDocument.id.in_(document_ids))
+        select(KbDocument.id, KbDocument.file_name, KbDocument.document_metadata).where(KbDocument.id.in_(document_ids))
     ).all()
     return {
-        str(document_id): file_name
-        for document_id, file_name in rows
-        if file_name and file_name.strip()
+        str(document_id): resolved_file_name
+        for document_id, file_name, metadata in rows
+        if (resolved_file_name := _document_file_name_from_row(file_name, metadata)) is not None
     }
+
+
+def _document_file_name_from_row(file_name: str | None, metadata: dict | None) -> str | None:
+    if file_name and file_name.strip():
+        return file_name.strip()
+
+    source_file_name = (metadata or {}).get("source_file_name")
+    if isinstance(source_file_name, str) and source_file_name.strip():
+        return source_file_name.strip()
+
+    return None
 
 
 def _add_unanswered(

@@ -92,6 +92,7 @@ async def import_markdown_document(
         kb_document = KbDocument(
             title=document.title,                          # 文档标题（去除文件名数字前缀）
             source_path=str(document.path),                 # md文件本地路径
+            file_name=document.path.name,                   # 原始文档文件名，用于问答引用展示
             file_sha256=document.file_sha256,              # 文件哈希，用于全局去重
             file_type="markdown",                           # 文件类型标记
             status=DocumentStatus.processing,                # 状态：处理中

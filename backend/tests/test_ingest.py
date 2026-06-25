@@ -131,6 +131,7 @@ async def test_import_markdown_document_creates_document_task_and_segments():
     assert document_id == created_document.id
     assert created_document.title == "逆变器故障与维护"
     assert created_document.source_path == "01_逆变器故障与维护.md"
+    assert created_document.file_name == "01_逆变器故障与维护.md"
     assert created_document.file_sha256 == "abc123"
     assert created_document.file_type == "markdown"
     assert created_document.status == DocumentStatus.ready

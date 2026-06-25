@@ -1,4 +1,7 @@
+import logging
+
 from app.core.config import Settings
+from app.main import create_app
 
 
 def test_settings_reads_rag_configuration(monkeypatch):
@@ -101,6 +104,26 @@ def test_settings_reads_qa_debug_logging_configuration():
     assert settings.qa_debug_log_enabled is True
     assert settings.qa_debug_question_preview_chars == 60
     assert settings.qa_debug_evidence_preview_enabled is True
+
+
+def test_create_app_configures_app_logger_for_info_output():
+    app_logger = logging.getLogger("app.services.qa_service")
+    app_logger.handlers.clear()
+    app_logger.setLevel(logging.NOTSET)
+
+    root_logger = logging.getLogger()
+    original_root_handlers = list(root_logger.handlers)
+    original_root_level = root_logger.level
+    root_logger.handlers.clear()
+    root_logger.setLevel(logging.WARNING)
+
+    try:
+        create_app()
+        assert app_logger.getEffectiveLevel() == logging.INFO
+    finally:
+        logging.getLogger("app").handlers.clear()
+        root_logger.handlers[:] = original_root_handlers
+        root_logger.setLevel(original_root_level)
 
 
 def test_normalize_env_file_script_imports_safely_without_executing_main():

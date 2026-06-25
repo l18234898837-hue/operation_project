@@ -174,12 +174,26 @@ def test_add_references_maps_document_file_name_for_parseable_uuid_strings():
     item = _ReferenceItem()
     item.document_id = f"{{{str(document_id).upper()}}}"
     item.segment_id = str(segment_id)
-    session = _ReferenceSession([(document_id, "inverter-maintenance.md")])
+    session = _ReferenceSession([(document_id, "inverter-maintenance.md", None)])
     record = type("Record", (), {"id": uuid.uuid4()})()
 
     references = _add_references(session, record, [item], visible_top_k=1)
 
     assert references[0].document_file_name == "inverter-maintenance.md"
+
+
+def test_add_references_uses_metadata_source_file_name_for_existing_documents():
+    document_id = uuid.UUID("12345678-1234-5678-1234-567812345678")
+    segment_id = uuid.UUID("87654321-4321-8765-4321-876543218765")
+    item = _ReferenceItem()
+    item.document_id = str(document_id)
+    item.segment_id = str(segment_id)
+    session = _ReferenceSession([(document_id, None, {"source_file_name": "legacy-maintenance.md"})])
+    record = type("Record", (), {"id": uuid.uuid4()})()
+
+    references = _add_references(session, record, [item], visible_top_k=1)
+
+    assert references[0].document_file_name == "legacy-maintenance.md"
 
 
 def test_add_references_does_not_fallback_to_document_title_without_file_name():
@@ -188,7 +202,7 @@ def test_add_references_does_not_fallback_to_document_title_without_file_name():
     item = _ReferenceItem()
     item.document_id = str(document_id)
     item.segment_id = str(segment_id)
-    session = _ReferenceSession([(document_id, None)])
+    session = _ReferenceSession([(document_id, None, {})])
     record = type("Record", (), {"id": uuid.uuid4()})()
 
     references = _add_references(session, record, [item], visible_top_k=1)

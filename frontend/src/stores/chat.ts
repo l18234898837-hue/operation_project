@@ -1,11 +1,23 @@
 import { defineStore } from "pinia";
-import { computed, ref } from "vue";
+import { computed, ref, watch } from "vue";
 
 import { askQuestionStream } from "../api/qa";
 import { copyTextToClipboard } from "../chat/clipboard";
-import { getConversationSnapshot, type ChatMessage, type Conversation } from "../chat/conversationModel";
+import {
+  getConversationSnapshot,
+  sanitizePersistedChatState,
+  type ChatMessage,
+  type Conversation,
+  type PersistedChatState
+} from "../chat/conversationModel";
 import { describeAnswerType } from "../chat/qaPresentation";
 import type { BackendSessionId, QaAskResponse, QaReference, QaStreamEvent } from "../types/qa";
+
+interface ActiveStreamState {
+  controller: AbortController;
+  messageId: string;
+  statusMessage: string;
+}
 
 function createMessageId() {
   return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -14,6 +26,8 @@ function createMessageId() {
 function createBackendSessionId(): BackendSessionId {
   return crypto.randomUUID() as BackendSessionId;
 }
+
+const CHAT_STORAGE_KEY = "pvqa-chat-state";
 
 function getConversationGroup(timestamp: number) {
   const date = new Date(timestamp);
@@ -77,18 +91,43 @@ function buildStreamingResponse(
   };
 }
 
+function readPersistedChatState(): PersistedChatState {
+  if (typeof window === "undefined") {
+    return { conversations: [], activeConversationId: null };
+  }
+
+  const rawState = window.localStorage.getItem(CHAT_STORAGE_KEY);
+
+  if (!rawState) {
+    return { conversations: [], activeConversationId: null };
+  }
+
+  try {
+    return sanitizePersistedChatState(JSON.parse(rawState));
+  } catch {
+    return { conversations: [], activeConversationId: null };
+  }
+}
+
+function persistChatState(state: PersistedChatState) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  window.localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(sanitizePersistedChatState(state)));
+}
+
 export const useChatStore = defineStore("chat", () => {
+  const persistedState = readPersistedChatState();
   const question = ref("");
-  const conversations = ref<Conversation[]>([]);
-  const activeConversationId = ref<string | null>(null);
+  const conversations = ref<Conversation[]>(persistedState.conversations);
+  const activeConversationId = ref<string | null>(persistedState.activeConversationId);
   const historyQuery = ref("");
   const lastQuestion = ref("");
   const errorMessage = ref("");
   const copyMessage = ref("");
   const streamStatusMessage = ref("");
-  const activeStreamController = ref<AbortController | null>(null);
-  const activeStreamConversationId = ref<string | null>(null);
-  const activeStreamMessageId = ref<string | null>(null);
+  const activeStreams = ref(new Map<string, ActiveStreamState>());
 
   const activeSnapshot = computed(() => getConversationSnapshot(conversations.value, activeConversationId.value));
   const status = computed(() => activeSnapshot.value.status);
@@ -102,6 +141,9 @@ export const useChatStore = defineStore("chat", () => {
     latestResponse.value ? describeAnswerType(latestResponse.value.answer_type) : describeAnswerType("none")
   );
   const canSend = computed(() => question.value.trim().length > 0 && !isStreamingStatus(status.value));
+  const activeStreamController = computed(() =>
+    activeConversationId.value ? activeStreams.value.get(activeConversationId.value)?.controller ?? null : null
+  );
   const historyGroups = computed(() => {
     const normalizedQuery = historyQuery.value.trim().toLocaleLowerCase();
     const groupLabels = ["今天", "昨天", "更早"];
@@ -127,6 +169,27 @@ export const useChatStore = defineStore("chat", () => {
   });
   const hasHistorySearchResults = computed(() => historyQuery.value.trim().length === 0 || historyGroups.value.length > 0);
 
+  watch(
+    [conversations, activeConversationId],
+    () => {
+      persistChatState({
+        conversations: conversations.value,
+        activeConversationId: activeConversationId.value
+      });
+    },
+    { deep: true }
+  );
+
+  watch(
+    [activeStreams, activeConversationId],
+    () => {
+      streamStatusMessage.value = activeConversationId.value
+        ? activeStreams.value.get(activeConversationId.value)?.statusMessage ?? ""
+        : "";
+    },
+    { deep: true }
+  );
+
   function isStreamingStatus(value: string) {
     return value === "asking" || value === "streaming";
   }
@@ -139,34 +202,60 @@ export const useChatStore = defineStore("chat", () => {
     return activeConversationId.value === conversationId;
   }
 
+  function setActiveStreamState(conversationId: string, state: ActiveStreamState) {
+    const nextStreams = new Map(activeStreams.value);
+    nextStreams.set(conversationId, state);
+    activeStreams.value = nextStreams;
+  }
+
+  function removeActiveStreamState(conversationId: string, controller?: AbortController) {
+    const streamState = activeStreams.value.get(conversationId);
+
+    if (!streamState || (controller && streamState.controller !== controller)) {
+      return;
+    }
+
+    const nextStreams = new Map(activeStreams.value);
+    nextStreams.delete(conversationId);
+    activeStreams.value = nextStreams;
+  }
+
   function clearActiveStreamStatus(conversationId: string) {
-    if (isActiveConversation(conversationId)) {
-      streamStatusMessage.value = "";
+    const streamState = activeStreams.value.get(conversationId);
+
+    if (streamState) {
+      setActiveStreamState(conversationId, { ...streamState, statusMessage: "" });
     }
   }
 
   function setActiveStreamStatus(conversationId: string, message: string) {
-    if (isActiveConversation(conversationId)) {
-      streamStatusMessage.value = message;
+    const streamState = activeStreams.value.get(conversationId);
+
+    if (streamState) {
+      setActiveStreamState(conversationId, { ...streamState, statusMessage: message });
     }
   }
 
   function setActiveStreamError(conversationId: string, message: string) {
     if (isActiveConversation(conversationId)) {
       errorMessage.value = message;
-      streamStatusMessage.value = "";
     }
+
+    clearActiveStreamStatus(conversationId);
   }
 
-  function abortActiveStream() {
-    const streamConversationId = activeStreamConversationId.value;
-    const streamMessageId = activeStreamMessageId.value;
+  function abortConversationStream(conversationId: string, markInterrupted = true) {
+    const streamState = activeStreams.value.get(conversationId);
 
-    activeStreamController.value?.abort();
+    if (!streamState) {
+      return;
+    }
 
-    if (streamConversationId && streamMessageId) {
-      const conversation = conversations.value.find((item) => item.id === streamConversationId);
-      const message = conversation?.messages.find((item) => item.id === streamMessageId);
+    streamState.controller.abort();
+
+    if (markInterrupted) {
+      const conversation = conversations.value.find((item) => item.id === conversationId);
+      const message = conversation?.messages.find((item) => item.id === streamState.messageId);
 
       if (conversation && message && isStreamingStatus(conversation.status)) {
         conversation.status = "error";
@@ -176,10 +265,11 @@ export const useChatStore = defineStore("chat", () => {
       }
     }
 
-    activeStreamController.value = null;
-    activeStreamConversationId.value = null;
-    activeStreamMessageId.value = null;
-    streamStatusMessage.value = "";
+    removeActiveStreamState(conversationId, streamState.controller);
+  }
+
+  function abortAllStreams() {
+    Array.from(activeStreams.value.keys()).forEach((conversationId) => abortConversationStream(conversationId));
   }
 
   function updateConversationTimestamp(conversation: Conversation, timestamp = Date.now()) {
@@ -189,7 +279,6 @@ export const useChatStore = defineStore("chat", () => {
   }
 
   function newConversation() {
-    abortActiveStream();
     activeConversationId.value = null;
     question.value = "";
     errorMessage.value = "";
@@ -198,10 +287,10 @@ export const useChatStore = defineStore("chat", () => {
 
   function deleteConversation(conversationId: string) {
     const isDeletingActive = activeConversationId.value === conversationId;
-    const isDeletingStreamingConversation = activeStreamConversationId.value === conversationId;
+    const isDeletingStreamingConversation = activeStreams.value.has(conversationId);
 
-    if (isDeletingActive || isDeletingStreamingConversation) {
-      abortActiveStream();
+    if (isDeletingStreamingConversation) {
+      abortConversationStream(conversationId, false);
     }
 
     if (isDeletingActive) {
@@ -265,10 +354,9 @@ export const useChatStore = defineStore("chat", () => {
     normalizedQuestion: string,
     backendSessionId: BackendSessionId
   ) {
-    abortActiveStream();
+    abortConversationStream(conversationId);
 
     const controller = new AbortController();
-    activeStreamController.value = controller;
     if (isActiveConversation(conversationId)) {
       streamStatusMessage.value = "正在理解问题...";
       errorMessage.value = "";
@@ -285,20 +373,25 @@ export const useChatStore = defineStore("chat", () => {
     const conversation = conversations.value.find((item) => item.id === conversationId);
 
     if (!conversation) {
-      activeStreamController.value = null;
       return;
     }
 
     conversation.status = "asking";
     conversation.messages = [...conversation.messages, assistantMessage];
-    activeStreamConversationId.value = conversationId;
-    activeStreamMessageId.value = assistantMessage.id;
+    setActiveStreamState(conversationId, {
+      controller,
+      messageId: assistantMessage.id,
+      statusMessage: streamStatusMessage.value
+    });
 
     let streamedAnswer = "";
     let streamedReferences: QaReference[] = [];
 
     function isCurrentStream() {
-      return activeStreamController.value === controller && conversations.value.some((item) => item.id === conversationId);
+      return (
+        activeStreams.value.get(conversationId)?.controller === controller &&
+        conversations.value.some((item) => item.id === conversationId)
+      );
     }
 
     function findConversationAndMessage() {
@@ -357,11 +450,7 @@ export const useChatStore = defineStore("chat", () => {
           targetMessage.status = "complete";
           clearActiveStreamStatus(conversationId);
           updateConversationTimestamp(targetConversation);
-          if (activeStreamController.value === controller) {
-            activeStreamController.value = null;
-            activeStreamConversationId.value = null;
-            activeStreamMessageId.value = null;
-          }
+          removeActiveStreamState(conversationId, controller);
           break;
         case "error":
           setActiveStreamError(conversationId, "问答接口暂时不可用，请稍后重试。");
@@ -394,11 +483,9 @@ export const useChatStore = defineStore("chat", () => {
       target.targetMessage.content = streamedAnswer || "回答生成失败";
       updateConversationTimestamp(target.targetConversation);
     } finally {
-      if (activeStreamController.value === controller) {
+      if (activeStreams.value.get(conversationId)?.controller === controller) {
         clearActiveStreamStatus(conversationId);
-        activeStreamController.value = null;
-        activeStreamConversationId.value = null;
-        activeStreamMessageId.value = null;
+        removeActiveStreamState(conversationId, controller);
       }
     }
   }
@@ -407,7 +494,6 @@ export const useChatStore = defineStore("chat", () => {
     activeConversationId.value = conversationId;
     errorMessage.value = "";
     copyMessage.value = "";
-    streamStatusMessage.value = "";
   }
 
   function findRetryUserIndex(conversation: Conversation, assistantMessageId?: string) {
@@ -461,7 +547,7 @@ export const useChatStore = defineStore("chat", () => {
   }
 
   function logout() {
-    abortActiveStream();
+    abortAllStreams();
     localStorage.removeItem("pvqa-role");
   }
 
