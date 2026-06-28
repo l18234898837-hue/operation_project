@@ -23,7 +23,7 @@ const {
   pageTitle,
   question,
   status,
-  streamStatusMessage
+  streamStatusMessages
 } = storeToRefs(chatStore);
 
 function logout() {
@@ -60,7 +60,7 @@ function logout() {
       :messages="messages"
       :page-title="pageTitle"
       :status="status"
-      :stream-status-message="streamStatusMessage"
+      :stream-status-messages="streamStatusMessages"
       @ask="chatStore.sendQuestion"
       @copy="chatStore.copyAnswer"
       @retry="chatStore.retryLastQuestion($event)"

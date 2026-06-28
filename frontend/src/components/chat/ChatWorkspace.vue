@@ -20,9 +20,9 @@ const props = withDefaults(defineProps<{
   canSend: boolean;
   copyMessage: string;
   errorMessage: string;
-  streamStatusMessage?: string;
+  streamStatusMessages?: string[];
 }>(), {
-  streamStatusMessage: ""
+  streamStatusMessages: () => []
 });
 
 const emit = defineEmits<{
@@ -47,7 +47,7 @@ watch(
     props.messages.length,
     props.status,
     props.messages.at(-1)?.content.length ?? 0,
-    props.streamStatusMessage
+    props.streamStatusMessages.length
   ],
   () => {
     void scrollToBottom();
@@ -79,7 +79,7 @@ watch(
           :answer-description="answerDescription"
           :can-retry="canRegenerateAssistantMessage(messages, message)"
           :message="message"
-          :status-text="streamStatusMessage"
+          :status-messages="streamStatusMessages"
           @copy="emit('copy', $event)"
           @retry="emit('retry', $event)"
         />

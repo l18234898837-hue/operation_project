@@ -39,7 +39,17 @@ export interface QaAskResponse {
   decision: Record<string, unknown>;
 }
 
-export type QaStreamStatusStage = "understanding" | "rewriting" | "retrieving" | "generating" | "done" | "error";
+export type QaStreamStatusStage =
+  | "understanding"
+  | "context"
+  | "rewriting"
+  | "retrieving"
+  | "evidence_ready"
+  | "low_confidence"
+  | "quick_reply"
+  | "generating"
+  | "done"
+  | "error";
 
 export type QaStreamEvent =
   | { event: "status"; data: { stage: QaStreamStatusStage; message: string } }

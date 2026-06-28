@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 import asyncio
+from contextlib import suppress
 import json
 import logging
 import time
@@ -25,17 +26,7 @@ STATUS_LOW_CONFIDENCE = "low_confidence"
 STATUS_QUICK_REPLY = "quick_reply"
 STATUS_DONE = "done"
 STATUS_ERROR = "error"
-STATUS_HEARTBEAT = "heartbeat"
 QUEUE_DONE = "__done__"
-HEARTBEAT_INTERVAL_SECONDS = 2.0
-HEARTBEAT_MESSAGES = (
-    "正在分析问题中的设备、故障和场景信息...",
-    "正在确认是否需要结合历史对话...",
-    "正在提取检索关键词...",
-    "正在匹配相关设备和故障条目...",
-    "正在筛选更可靠的证据片段...",
-    "正在把资料整理成更易执行的建议...",
-)
 
 
 def format_sse_event(event: str, data: dict[str, Any]) -> str:
@@ -74,7 +65,6 @@ async def stream_qa_events(
     )
     try:
         queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
-        heartbeat = _HeartbeatState()
         streaming_dependencies = _with_streaming_answer_client(dependencies, queue)
         answer_task = asyncio.create_task(
             answer_question(
@@ -100,20 +90,22 @@ async def stream_qa_events(
         while True:
             if answer_task.done() and queue.empty():
                 break
-            try:
-                item = await asyncio.wait_for(
-                    queue.get(),
-                    timeout=heartbeat.timeout_seconds(),
-                )
-            except asyncio.TimeoutError:
-                heartbeat_event = heartbeat.next_event()
-                if heartbeat_event is not None:
-                    yield heartbeat_event
+
+            get_task = asyncio.create_task(queue.get())
+            done, _ = await asyncio.wait(
+                {get_task, answer_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if get_task not in done:
+                get_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await get_task
                 continue
+
+            item = get_task.result()
             if item.get("event") == QUEUE_DONE:
                 continue
             if item.get("event") == "status":
-                heartbeat.reset()
                 yield format_sse_event(
                     "status",
                     {
@@ -126,7 +118,6 @@ async def stream_qa_events(
             chunk = str(item.get("text") or "")
             if not chunk:
                 continue
-            heartbeat.reset()
             if not first_delta_sent:
                 first_delta_sent = True
                 _log_stream_debug(
@@ -229,36 +220,6 @@ def _progress_callback(queue: asyncio.Queue[dict[str, Any]]):
         )
 
     return _callback
-
-
-class _HeartbeatState:
-    def __init__(self) -> None:
-        self._last_activity = time.perf_counter()
-        self._index = 0
-
-    def reset(self) -> None:
-        self._last_activity = time.perf_counter()
-        self._index = 0
-
-    def timeout_seconds(self) -> float:
-        elapsed = time.perf_counter() - self._last_activity
-        return max(0.1, HEARTBEAT_INTERVAL_SECONDS - elapsed)
-
-    def next_event(self) -> str | None:
-        now = time.perf_counter()
-        if now - self._last_activity < HEARTBEAT_INTERVAL_SECONDS:
-            return None
-        message = HEARTBEAT_MESSAGES[self._index % len(HEARTBEAT_MESSAGES)]
-        self._index += 1
-        self._last_activity = now
-        return format_sse_event(
-            "status",
-            {
-                "stage": STATUS_HEARTBEAT,
-                "message": message,
-                "heartbeat": True,
-            },
-        )
 
 
 class _StreamingAnswerClient:

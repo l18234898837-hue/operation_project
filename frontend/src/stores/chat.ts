@@ -16,7 +16,7 @@ import type { BackendSessionId, QaAskResponse, QaReference, QaStreamEvent } from
 interface ActiveStreamState {
   controller: AbortController;
   messageId: string;
-  statusMessage: string;
+  statusMessages: string[];
 }
 
 export interface ConversationHistoryItem extends Conversation {
@@ -215,7 +215,7 @@ export const useChatStore = defineStore("chat", () => {
   const lastQuestion = ref("");
   const errorMessage = ref("");
   const copyMessage = ref("");
-  const streamStatusMessage = ref("");
+  const streamStatusMessages = ref<string[]>([]);
   const activeStreams = ref(new Map<string, ActiveStreamState>());
 
   const activeSnapshot = computed(() => getConversationSnapshot(conversations.value, activeConversationId.value));
@@ -312,9 +312,9 @@ export const useChatStore = defineStore("chat", () => {
   watch(
     [activeStreams, activeConversationId],
     () => {
-      streamStatusMessage.value = activeConversationId.value
-        ? activeStreams.value.get(activeConversationId.value)?.statusMessage ?? ""
-        : "";
+      streamStatusMessages.value = activeConversationId.value
+        ? activeStreams.value.get(activeConversationId.value)?.statusMessages ?? []
+        : [];
     },
     { deep: true }
   );
@@ -357,16 +357,27 @@ export const useChatStore = defineStore("chat", () => {
     const streamState = activeStreams.value.get(conversationId);
 
     if (streamState) {
-      setActiveStreamState(conversationId, { ...streamState, statusMessage: "" });
+      setActiveStreamState(conversationId, { ...streamState, statusMessages: [] });
     }
   }
 
   function setActiveStreamStatus(conversationId: string, message: string) {
     const streamState = activeStreams.value.get(conversationId);
+    const normalizedMessage = message.trim();
 
-    if (streamState) {
-      setActiveStreamState(conversationId, { ...streamState, statusMessage: message });
+    if (!streamState || !normalizedMessage) {
+      return;
     }
+
+    const lastMessage = streamState.statusMessages.at(-1);
+    if (lastMessage === normalizedMessage) {
+      return;
+    }
+
+    setActiveStreamState(conversationId, {
+      ...streamState,
+      statusMessages: [...streamState.statusMessages, normalizedMessage]
+    });
   }
 
   function setActiveStreamError(conversationId: string, message: string) {
@@ -497,8 +508,9 @@ export const useChatStore = defineStore("chat", () => {
     abortConversationStream(conversationId);
 
     const controller = new AbortController();
+    const initialStatusMessages = ["已提交问题，等待服务响应..."];
     if (isActiveConversation(conversationId)) {
-      streamStatusMessage.value = "正在理解问题...";
+      streamStatusMessages.value = initialStatusMessages;
       errorMessage.value = "";
       copyMessage.value = "";
     }
@@ -506,7 +518,7 @@ export const useChatStore = defineStore("chat", () => {
     const assistantMessage: ChatMessage = {
       id: createMessageId(),
       role: "assistant",
-      content: "正在生成回答...",
+      content: "",
       createdAt: currentChatTime(),
       status: "streaming"
     };
@@ -522,7 +534,7 @@ export const useChatStore = defineStore("chat", () => {
     setActiveStreamState(conversationId, {
       controller,
       messageId: assistantMessage.id,
-      statusMessage: streamStatusMessage.value
+      statusMessages: initialStatusMessages
     });
 
     let streamedAnswer = "";
@@ -703,7 +715,7 @@ export const useChatStore = defineStore("chat", () => {
     lastQuestion,
     errorMessage,
     copyMessage,
-    streamStatusMessage,
+    streamStatusMessages,
     activeStreamController,
     activeSnapshot,
     status,

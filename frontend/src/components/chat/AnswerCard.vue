@@ -13,11 +13,11 @@ withDefaults(
     message: ChatMessage;
     answerDescription: AnswerTypeDescription;
     canRetry?: boolean;
-    statusText?: string;
+    statusMessages?: string[];
   }>(),
   {
     canRetry: false,
-    statusText: ""
+    statusMessages: () => []
   }
 );
 
@@ -42,7 +42,22 @@ defineEmits<{
         <time>{{ message.createdAt }}</time>
         <div class="message-bubble">
           <div v-if="message.role === 'assistant'" class="assistant-answer-body">
-            <p v-if="message.status === 'streaming' && !message.content">{{ statusText || "正在生成回答..." }}</p>
+            <ol
+              v-if="message.status === 'streaming' && statusMessages.length"
+              class="stream-status-list"
+              aria-label="回答处理进度"
+            >
+              <li
+                v-for="(statusMessage, index) in statusMessages"
+                :key="`${index}-${statusMessage}`"
+                :class="{ active: index === statusMessages.length - 1 }"
+              >
+                <span class="stream-status-dot" aria-hidden="true"></span>
+                <span>{{ statusMessage }}</span>
+              </li>
+            </ol>
+            <MarkdownAnswer v-if="message.content" :content="message.content" />
+            <p v-else-if="message.status === 'streaming'" class="answer-waiting-text">答案准备中...</p>
             <MarkdownAnswer v-else :content="message.content" />
             <span
               v-if="message.status === 'streaming'"
