@@ -12,13 +12,16 @@ from app.services.routing_terms import (
     CHITCHAT_EXACT_TERMS,
     CHITCHAT_PATTERNS,
     DOMAIN_TERMS,
+    EFFICIENCY_TERMS,
     ENVIRONMENT_TERMS,
     FAULT_ACTION_TERMS,
     FAULT_CODE_PATTERNS,
     FOLLOW_UP_TERMS,
     GENERATION_IMPACT_TERMS,
+    IMPROVEMENT_ACTION_TERMS,
     LOCATION_TERMS,
     ALWAYS_REALTIME_EXTERNAL_TERMS,
+    QUESTION_PREFIX_PATTERN,
     REALTIME_DATE_TERMS,
     REALTIME_TERMS,
     STRONG_DOMAIN_TERMS,
@@ -104,7 +107,7 @@ def apply_intent_hard_rules(
             confidence=1.0,
             should_use_knowledge_base=True,
             normalized_question=normalized,
-            search_query=normalized,
+            search_query=_build_hard_rule_search_query(normalized),
             refusal_reason=None,
             reason="hard_rule_domain_fault_action",
         )
@@ -242,6 +245,27 @@ def _fallback_to_knowledge_base(question: str, reason: str) -> QueryUnderstandin
         refusal_reason=None,
         reason=reason,
     )
+
+
+def _build_hard_rule_search_query(question: str) -> str:
+    inverter_efficiency_query = _build_inverter_efficiency_query(question)
+    if inverter_efficiency_query is not None:
+        return inverter_efficiency_query
+    return question
+
+
+def _build_inverter_efficiency_query(question: str) -> str | None:
+    if "逆变器" not in question:
+        return None
+    if not _contains_any(question, EFFICIENCY_TERMS):
+        return None
+    if not _contains_any(question, IMPROVEMENT_ACTION_TERMS):
+        return None
+
+    stripped = re.sub(QUESTION_PREFIX_PATTERN, "", question).strip(" ，。！？?；;：:")
+    if stripped.startswith("逆变器"):
+        return normalize_query(stripped)
+    return "逆变器效率提升"
 
 
 def _coerce_intent(value: object) -> Intent:

@@ -64,6 +64,20 @@ def test_select_evidence_compression_policy_uses_top2_for_high_confidence():
     assert policy.reason == "high_confidence_top2"
 
 
+def test_high_confidence_single_dominant_evidence_limits_generation_noise():
+    evidence = [
+        SimpleNamespace(rerank_score=0.91),
+        SimpleNamespace(rerank_score=0.44),
+        SimpleNamespace(rerank_score=0.43),
+        SimpleNamespace(rerank_score=0.31),
+    ]
+
+    policy = select_evidence_compression_policy(evidence)
+
+    assert policy.max_items == 2
+    assert policy.reason == "dominant_high_confidence_top2"
+
+
 def test_select_evidence_compression_policy_uses_top3_for_medium_confidence():
     evidence = [
         SimpleNamespace(rerank_score=0.72),

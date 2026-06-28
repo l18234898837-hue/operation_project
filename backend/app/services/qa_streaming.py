@@ -149,6 +149,7 @@ async def stream_qa_events(
             session_id=response.session_id,
             route=response.decision.get("route"),
             answer_type=response.answer_type,
+            answer=response.answer,
             references_count=len(response.references),
             total_ms=_elapsed_ms(start),
         )
@@ -301,6 +302,30 @@ class _StreamingAnswerClient:
             return "".join(parts)
 
         answer = await self._wrapped.generate_general(question, mode=mode)
+        await self._queue.put({"event": "answer_delta", "text": answer})
+        await self._queue.put({"event": QUEUE_DONE})
+        return answer
+
+    async def generate_low_confidence_rag(
+        self,
+        question: str,
+        evidence: list[object],
+        top_score: float | None,
+    ) -> str:
+        stream_low_confidence = getattr(self._wrapped, "stream_low_confidence_rag", None)
+        if stream_low_confidence is not None:
+            parts: list[str] = []
+            async for chunk in stream_low_confidence(question, evidence, top_score):
+                parts.append(chunk)
+                await self._queue.put({"event": "answer_delta", "text": chunk})
+            await self._queue.put({"event": QUEUE_DONE})
+            return "".join(parts)
+
+        answer = await self._wrapped.generate_low_confidence_rag(
+            question,
+            evidence,
+            top_score,
+        )
         await self._queue.put({"event": "answer_delta", "text": answer})
         await self._queue.put({"event": QUEUE_DONE})
         return answer

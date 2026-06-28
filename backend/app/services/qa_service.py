@@ -29,6 +29,7 @@ from app.services.evidence_filtering import (
     filter_references_for_response,
     select_evidence_compression_policy,
 )
+from app.services.evidence_alignment import check_evidence_directly_supports_question
 from app.services.qa_debug_logging import log_qa_debug_event
 from app.services.qa_error_handling import classify_qa_exception
 from app.services.qa_trace import (
@@ -39,6 +40,10 @@ from app.services.query_understanding import (
     Intent,
     QueryUnderstandingResult,
     apply_intent_hard_rules,
+)
+from app.services.rag_confidence_policy import (
+    effective_low_confidence_threshold,
+    effective_strong_rag_threshold,
 )
 
 logger = logging.getLogger(__name__)
@@ -66,6 +71,14 @@ class AnswerClient(Protocol):
         ...
 
     async def generate_general(self, question: str, mode: str = "general") -> str:
+        ...
+
+    async def generate_low_confidence_rag(
+        self,
+        question: str,
+        evidence: list[object],
+        top_score: float | None,
+    ) -> str:
         ...
 
 
@@ -303,7 +316,11 @@ async def _answer_question_inner(
         "正在理解你的问题...",
     )
     hard_rule_understanding = apply_intent_hard_rules(question)
-    if hard_rule_understanding is not None:
+    if (
+        hard_rule_understanding is not None
+        and hard_rule_understanding.intent
+        in {Intent.chitchat, Intent.invalid_input, Intent.realtime_external}
+    ):
         _log_debug(
             debug_context,
             "qa.intent.hard_rule",
@@ -387,27 +404,6 @@ async def _answer_question_inner(
                 timings=timings,
                 debug_context=debug_context,
             )
-        if hard_rule_understanding.intent == Intent.knowledge_base_qa:
-            return await _answer_rag_route(
-                session=session,
-                dependencies=dependencies,
-                qa_session=qa_session,
-                previous_records=[],
-                question=question,
-                understanding=hard_rule_understanding,
-                rewrite_metadata=_skipped_rewrite_metadata(question, "pre_route_knowledge_base"),
-                min_rerank_score=min_rerank_score,
-                strong_rerank_score=strong_rerank_score,
-                qa_evidence_min_score=qa_evidence_min_score,
-                qa_reference_min_score=qa_reference_min_score,
-                qa_reference_visible_top_k=qa_reference_visible_top_k,
-                qa_reference_max_top_k=qa_reference_max_top_k,
-                trace_id=trace_id,
-                trace=trace,
-                start=start,
-                timings=timings,
-                debug_context=debug_context,
-            )
 
     step_start = time.perf_counter()
     await _emit_progress(
@@ -474,9 +470,13 @@ async def _answer_question_inner(
         "understanding",
         "正在判断是否需要查询知识库...",
     )
-    understanding = await dependencies.understanding_client.understand(
-        question_for_understanding
-    )
+    hard_rule_understanding = apply_intent_hard_rules(question_for_understanding)
+    if hard_rule_understanding is not None:
+        understanding = hard_rule_understanding
+    else:
+        understanding = await dependencies.understanding_client.understand(
+            question_for_understanding
+        )
     _record_timing(timings, trace, "understand_intent", step_start)
     rewrite_metadata = _rewrite_metadata(question, rewrite_result)
     _log_debug(
@@ -733,6 +733,106 @@ async def _answer_refused_route(
     )
 
 
+async def _answer_low_confidence_supplement_route(
+    session: Session,
+    dependencies: QaDependencies,
+    qa_session: QaSession,
+    previous_records: list[QaRecord],
+    question: str,
+    understanding: QueryUnderstandingResult,
+    rewrite_metadata: dict[str, object],
+    evidence: list[object],
+    top_score: float | None,
+    min_rerank_score: float,
+    configured_min_rerank_score: float,
+    intent: str,
+    trace_id: str,
+    trace: QaTraceCollector,
+    start: float,
+    timings: dict[str, int],
+    debug_context: QaDebugContext,
+) -> QaAskResponse:
+    step_start = time.perf_counter()
+    low_confidence_evidence = compress_evidence_for_generation(
+        evidence[:4],
+        max_chars_per_item=500,
+    )
+    await _emit_progress(
+        dependencies,
+        "low_confidence",
+        "知识库资料不够充分，正在结合可参考片段和通用运维经验整理建议...",
+        {
+            "top1_rerank_score": top_score,
+            "generation_evidence_count": len(low_confidence_evidence),
+        },
+    )
+    answer = await dependencies.answer_client.generate_low_confidence_rag(
+        question=understanding.normalized_question,
+        evidence=low_confidence_evidence,
+        top_score=top_score,
+    )
+    _record_timing(timings, trace, "answer_generation", step_start)
+    answer_diagnostics = _answer_diagnostics(dependencies.answer_client)
+    _merge_timing_diagnostics(timings, "answer_generation", answer_diagnostics)
+    _log_debug(
+        debug_context,
+        "qa.answer.generated",
+        trace_id=trace_id,
+        session_id=qa_session.id,
+        route="rag_low_confidence_supplement",
+        diagnostics=answer_diagnostics,
+        duration_ms=timings.get("answer_generation_ms"),
+    )
+
+    record = _add_record(
+        session=session,
+        qa_session=qa_session,
+        trace_id=trace_id,
+        question=question,
+        understanding=understanding,
+        answer=answer,
+        answer_type=AnswerType.rag,
+        confidence=top_score,
+        latency_ms=_latency_ms(start),
+        decision_extra={
+            **rewrite_metadata,
+            "route": "rag_low_confidence_supplement",
+            "used_knowledge_base": True,
+            "refusal_reason": None,
+            "answer_mode": "low_confidence_supplement",
+            "top1_rerank_score": top_score,
+            "threshold": min_rerank_score,
+            "configured_low_confidence_threshold": configured_min_rerank_score,
+            "effective_low_confidence_threshold": min_rerank_score,
+            "generation_evidence_count": len(low_confidence_evidence),
+            "generation_evidence_chars": _evidence_chars(low_confidence_evidence),
+            "timings_ms": _timings_snapshot(start, timings),
+        },
+    )
+    references = _add_references(
+        session=session,
+        record=record,
+        evidence=evidence[:4],
+        visible_top_k=min(3, len(evidence[:4])),
+        usage_note="仅作相关片段参考",
+    )
+    return await _finalize_response(
+        session=session,
+        dependencies=dependencies,
+        qa_session=qa_session,
+        records=[*previous_records, record],
+        record=record,
+        intent=intent,
+        references=references,
+        trace_id=trace_id,
+        trace=trace,
+        start=start,
+        timings=timings,
+        route="rag_low_confidence_supplement",
+        debug_context=debug_context,
+    )
+
+
 async def _answer_rag_route(
     session: Session,
     dependencies: QaDependencies,
@@ -754,6 +854,8 @@ async def _answer_rag_route(
     debug_context: QaDebugContext,
 ) -> QaAskResponse:
     search_query = understanding.search_query or understanding.normalized_question
+    low_confidence_threshold = effective_low_confidence_threshold(min_rerank_score)
+    strong_rag_threshold = effective_strong_rag_threshold(strong_rerank_score)
     step_start = time.perf_counter()
     await _emit_progress(
         dependencies,
@@ -778,14 +880,13 @@ async def _answer_rag_route(
         duration_ms=timings.get("retrieve_evidence_ms"),
     )
 
-    if top_score is None or top_score < min_rerank_score:
+    if top_score is None:
         await _emit_progress(
             dependencies,
             "low_confidence",
             "知识库匹配度较低，正在判断是否可以可靠回答...",
             {
                 "top1_rerank_score": top_score,
-                "threshold": min_rerank_score,
             },
         )
         answer = "当前知识库没有找到足够相关的依据，暂时无法可靠回答该问题。"
@@ -805,7 +906,9 @@ async def _answer_rag_route(
                 "used_knowledge_base": True,
                 "refusal_reason": "low_confidence",
                 "top1_rerank_score": top_score,
-                "threshold": min_rerank_score,
+                "threshold": low_confidence_threshold,
+                "configured_low_confidence_threshold": min_rerank_score,
+                "effective_low_confidence_threshold": low_confidence_threshold,
                 "timings_ms": _timings_snapshot(start, timings),
             },
         )
@@ -830,6 +933,27 @@ async def _answer_rag_route(
             start=start,
             timings=timings,
             route="refused",
+            debug_context=debug_context,
+        )
+
+    if top_score < low_confidence_threshold:
+        return await _answer_low_confidence_supplement_route(
+            session=session,
+            dependencies=dependencies,
+            qa_session=qa_session,
+            previous_records=previous_records,
+            question=question,
+            understanding=understanding,
+            rewrite_metadata=rewrite_metadata,
+            evidence=evidence,
+            top_score=top_score,
+            min_rerank_score=low_confidence_threshold,
+            configured_min_rerank_score=min_rerank_score,
+            intent=understanding.intent.value,
+            trace_id=trace_id,
+            trace=trace,
+            start=start,
+            timings=timings,
             debug_context=debug_context,
         )
 
@@ -883,54 +1007,66 @@ async def _answer_rag_route(
         await _emit_progress(
             dependencies,
             "low_confidence",
-            "知识库匹配度较低，正在判断是否可以可靠回答...",
+            "知识库匹配度较低，正在结合资料和通用运维经验整理建议...",
         )
-        answer = "当前知识库检索结果未达到进入答案生成的证据阈值，暂时无法可靠回答该问题。"
-        record = _add_record(
-            session=session,
-            qa_session=qa_session,
-            trace_id=trace_id,
-            question=question,
-            understanding=understanding,
-            answer=answer,
-            answer_type=AnswerType.refused,
-            confidence=top_score,
-            latency_ms=_latency_ms(start),
-            decision_extra={
-                **rewrite_metadata,
-                "route": "refused",
-                "used_knowledge_base": True,
-                "refusal_reason": "no_evidence_after_filtering",
-                "top1_rerank_score": top_score,
-                "threshold": min_rerank_score,
-                "timings_ms": _timings_snapshot(start, timings),
-            },
-        )
-        _add_unanswered(
-            session=session,
-            qa_session=qa_session,
-            record=record,
-            question=question,
-            understanding=understanding,
-            reason="no_evidence_after_filtering",
-        )
-        return await _finalize_response(
+        return await _answer_low_confidence_supplement_route(
             session=session,
             dependencies=dependencies,
             qa_session=qa_session,
-            records=[*previous_records, record],
-            record=record,
+            previous_records=previous_records,
+            question=question,
+            understanding=understanding,
+            rewrite_metadata=rewrite_metadata,
+            evidence=evidence,
+            top_score=top_score,
+            min_rerank_score=low_confidence_threshold,
+            configured_min_rerank_score=min_rerank_score,
             intent=understanding.intent.value,
-            references=[],
             trace_id=trace_id,
             trace=trace,
             start=start,
             timings=timings,
-            route="refused",
             debug_context=debug_context,
         )
 
-    cautious = top_score < strong_rerank_score
+    alignment = check_evidence_directly_supports_question(
+        understanding.normalized_question,
+        evidence_for_answer,
+    )
+    if not alignment.directly_supported:
+        await _emit_progress(
+            dependencies,
+            "low_confidence",
+            "找到的资料与问题主题不完全匹配，正在结合可参考片段和通用运维经验整理建议...",
+            {
+                "top1_rerank_score": top_score,
+                "evidence_alignment": alignment.to_metadata(),
+            },
+        )
+        return await _answer_low_confidence_supplement_route(
+            session=session,
+            dependencies=dependencies,
+            qa_session=qa_session,
+            previous_records=previous_records,
+            question=question,
+            understanding=understanding,
+            rewrite_metadata={
+                **rewrite_metadata,
+                "evidence_alignment": alignment.to_metadata(),
+            },
+            evidence=evidence,
+            top_score=top_score,
+            min_rerank_score=low_confidence_threshold,
+            configured_min_rerank_score=min_rerank_score,
+            intent=understanding.intent.value,
+            trace_id=trace_id,
+            trace=trace,
+            start=start,
+            timings=timings,
+            debug_context=debug_context,
+        )
+
+    cautious = top_score < strong_rag_threshold
     step_start = time.perf_counter()
     await _emit_progress(
         dependencies,
@@ -972,7 +1108,11 @@ async def _answer_rag_route(
             "used_knowledge_base": True,
             "refusal_reason": None,
             "top1_rerank_score": top_score,
-            "threshold": min_rerank_score,
+            "threshold": low_confidence_threshold,
+            "configured_low_confidence_threshold": min_rerank_score,
+            "effective_low_confidence_threshold": low_confidence_threshold,
+            "configured_strong_rag_threshold": strong_rerank_score,
+            "effective_strong_rag_threshold": strong_rag_threshold,
             "evidence_min_score": qa_evidence_min_score,
             "reference_min_score": qa_reference_min_score,
             "reference_visible_top_k": qa_reference_visible_top_k,
@@ -1168,6 +1308,7 @@ async def _finalize_response(
         route=route,
         answer_type=record.answer_type.value,
         intent=intent,
+        answer=record.answer,
         confidence=record.confidence,
         references_count=len(references),
         total_ms=timings.get("total_ms"),
@@ -1242,10 +1383,14 @@ def _add_references(
     record: QaRecord,
     evidence: list[object],
     visible_top_k: int,
+    usage_note: str | None = None,
 ) -> list[QaReferenceSchema]:
     references: list[QaReferenceSchema] = []
     document_file_names = _document_file_names(session, evidence)
     for rank, item in enumerate(evidence, start=1):
+        ref_metadata = {"heading_path": getattr(item, "heading_path", "") or ""}
+        if usage_note is not None:
+            ref_metadata["usage_note"] = usage_note
         reference = QaReference(
             qa_record_id=record.id,
             document_id=_uuid_or_none(getattr(item, "document_id", None)),
@@ -1256,7 +1401,7 @@ def _add_references(
             keyword_score=getattr(item, "keyword_score", None),
             rrf_score=getattr(item, "rrf_score", None),
             excerpt=(getattr(item, "clean_text", "") or "")[:500],
-            ref_metadata={"heading_path": getattr(item, "heading_path", "") or ""},
+            ref_metadata=ref_metadata,
         )
         session.add(reference)
         document_id = _document_file_name_key(getattr(item, "document_id", None))
@@ -1266,6 +1411,7 @@ def _add_references(
                 item,
                 visible=rank <= visible_top_k,
                 document_file_name=document_file_names.get(document_id),
+                usage_note=usage_note,
             )
         )
     return references
@@ -1347,6 +1493,7 @@ def _reference_schema(
     item: object,
     visible: bool = True,
     document_file_name: str | None = None,
+    usage_note: str | None = None,
 ) -> QaReferenceSchema:
     return QaReferenceSchema(
         rank=rank,
@@ -1360,6 +1507,7 @@ def _reference_schema(
         rrf_score=getattr(item, "rrf_score", None),
         rerank_score=getattr(item, "rerank_score", None),
         visible=visible,
+        usage_note=usage_note,
     )
 
 

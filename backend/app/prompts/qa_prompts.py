@@ -41,9 +41,14 @@ def build_rag_answer_messages(
 ) -> list[dict[str, str]]:
     system_prompt = (
         "你是光伏运维知识库问答助手。只能基于给定证据回答。"
-        "如果证据不足，必须说明当前知识库依据不足。"
         "不要编造厂家参数、故障码、设备型号或标准阈值。"
         "回答面向光伏运维人员，优先给出可能原因、排查步骤、处理建议和安全注意事项。"
+        "回答默认控制在 6-10 条要点，除非用户明确要求详细展开。"
+        "优先输出现场可执行步骤，不要写成长报告。"
+        "推荐结构为：结论、排查步骤、处理建议、安全注意。"
+        "如果证据没有明确给出，不得给出具体数值、温度阈值、电压等级、接触电阻、拉力、距离或时间要求，"
+        "应改写为“按厂家手册、现场规程或电站安全规范确认”。"
+        "只有当问题涉及阈值、型号、故障码或标准参数且证据未提供时，才补充“当前知识库依据不足”的说明。"
     )
     if cautious:
         system_prompt += (
@@ -54,6 +59,38 @@ def build_rag_answer_messages(
     return [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": build_rag_user_prompt(question, evidence)},
+    ]
+
+
+def build_low_confidence_rag_answer_messages(
+    question: str,
+    evidence: list[object],
+    top_score: float | None,
+) -> list[dict[str, str]]:
+    system_prompt = (
+        "你是光伏运维问答助手。本次知识库检索为低置信，不能把低相关片段说成充分依据。"
+        "回答必须分成两部分：第一部分标题为“能参考到的资料”，只说明当前资料能支持什么、不能支持什么；"
+        "第二部分标题为“结合现场经验的处理建议”，明确说明这些建议来自通用光伏运维经验，不作为资料依据。"
+        "现场经验建议要保守、现场可执行，优先给排查顺序、验证方法和安全注意。"
+        "不要编造厂家参数、故障码、设备型号或标准阈值；如果知识库证据没有明确给出，"
+        "不得给出具体数值、温度阈值、电压等级、接触电阻、拉力、距离或时间要求，"
+        "应改写为“按厂家手册、现场规程或电站安全规范确认”。"
+        "涉及断电、测量、开盖、端子处理时必须提醒安全隔离。"
+        "如果是追问型问题，例如安全事项、验证方法、下一步怎么做，整体控制在 4-6 条，"
+        "优先回答当前追问，不要写成长报告；其他问题默认控制在 6-8 条。"
+        "如果用户要求对比、分开列、整理排查路径或区分多类问题，优先用一个简短对照表加 3-5 条注意事项，"
+        "整体控制在 600-900 字，不要重复展开背景。"
+    )
+    user_prompt = (
+        f"用户问题：{question}\n"
+        f"知识库最高 rerank_score：{top_score}\n\n"
+        "低置信知识库证据片段：\n"
+        f"{_format_evidence(evidence, max_chars=800)}\n\n"
+        "请按“能参考到的资料”和“结合现场经验的处理建议”两部分回答。"
+    )
+    return [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
     ]
 
 
@@ -102,6 +139,10 @@ def build_standalone_question_messages(
                 "你的任务是根据会话摘要、最近历史和当前问题，生成可以独立检索的 standalone_question。"
                 "历史上下文只用于理解指代词，不作为事实来源。"
                 "如果当前问题已经完整，standalone_question 可以等于当前问题。"
+                "如果当前问题是在要求“整理、总结、给出处理建议、给运维人员能看懂的说法”，"
+                "并且最近历史有明确故障或设备主题，必须把该主题补入 standalone_question。"
+                "例如：历史主题为逆变器绝缘阻抗低，当前问题为“能不能给我一个运维人员能看懂的处理建议”，"
+                "standalone_question 应改写为“请把逆变器绝缘阻抗低告警的处理方法整理成运维人员能看懂的现场处理建议”。"
                 "只输出 JSON，字段为 is_follow_up, used_history, standalone_question, reason。"
             ),
         },
@@ -147,6 +188,14 @@ def build_session_summary_messages(
 
 def build_rag_user_prompt(question: str, evidence: list[object]) -> str:
     parts = [f"用户问题：{question}", "", "证据片段："]
+    parts.append(_format_evidence(evidence, max_chars=1200))
+    parts.append("")
+    parts.append("请基于以上证据回答用户问题。")
+    return "\n\n".join(parts)
+
+
+def _format_evidence(evidence: list[object], max_chars: int) -> str:
+    parts = []
     for index, item in enumerate(evidence, start=1):
         heading_path = _value(item, "heading_path", "")
         clean_text = str(_value(item, "clean_text", "") or "")
@@ -155,10 +204,8 @@ def build_rag_user_prompt(question: str, evidence: list[object]) -> str:
             f"证据 {index}\n"
             f"标题路径：{heading_path}\n"
             f"rerank_score：{rerank_score}\n"
-            f"内容：{clean_text[:1200]}"
+            f"内容：{clean_text[:max_chars]}"
         )
-    parts.append("")
-    parts.append("请基于以上证据回答用户问题。")
     return "\n\n".join(parts)
 
 

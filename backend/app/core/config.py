@@ -5,6 +5,11 @@ from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy import URL
 
+from app.services.rag_confidence_policy import (
+    LOW_CONFIDENCE_SUPPLEMENT_SCORE,
+    STRONG_RAG_SCORE,
+)
+
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 
@@ -57,8 +62,8 @@ class Settings(BaseSettings):
     retrieval_final_top_k: int = 5
     retrieval_rrf_k: int = 60
 
-    qa_rerank_min_score: float = 0.2
-    qa_rerank_strong_score: float = 0.6
+    qa_rerank_min_score: float = LOW_CONFIDENCE_SUPPLEMENT_SCORE
+    qa_rerank_strong_score: float = STRONG_RAG_SCORE
     qa_max_question_chars: int = 500
     qa_reference_top_k: int = 5
     qa_intent_model: str = "deepseek-ai/DeepSeek-V4-Flash"

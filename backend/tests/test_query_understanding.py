@@ -1,5 +1,6 @@
 import pytest
 
+import app.services.query_understanding as query_understanding
 from app.services.query_understanding import (
     Intent,
     QueryUnderstandingResult,
@@ -7,7 +8,14 @@ from app.services.query_understanding import (
     post_validate_understanding,
     understand_query,
 )
-from app.services.routing_terms import DOMAIN_TERMS, FAULT_ACTION_TERMS, REALTIME_TERMS
+from app.services.routing_terms import (
+    DOMAIN_TERMS,
+    EFFICIENCY_TERMS,
+    FAULT_ACTION_TERMS,
+    IMPROVEMENT_ACTION_TERMS,
+    QUESTION_PREFIX_PATTERN,
+    REALTIME_TERMS,
+)
 
 
 def test_empty_question_is_invalid_input():
@@ -23,6 +31,15 @@ def test_routing_terms_are_maintained_separately():
     assert "逆变器" in DOMAIN_TERMS
     assert "报警" in FAULT_ACTION_TERMS
     assert "天气" in REALTIME_TERMS
+
+
+def test_query_normalization_terms_are_maintained_with_routing_terms():
+    assert "效率" in EFFICIENCY_TERMS
+    assert "提升" in IMPROVEMENT_ACTION_TERMS
+    assert "如何" in QUESTION_PREFIX_PATTERN
+    assert not hasattr(query_understanding, "_EFFICIENCY_TERMS")
+    assert not hasattr(query_understanding, "_IMPROVEMENT_ACTION_TERMS")
+    assert not hasattr(query_understanding, "_QUESTION_PREFIX_RE")
 
 
 def test_realtime_external_question_is_detected_before_llm():
@@ -74,6 +91,16 @@ def test_domain_fault_question_forces_knowledge_base():
     assert result.should_use_knowledge_base is True
     assert result.normalized_question == "逆变器漏电流报警怎么处理？"
     assert "逆变器漏电流报警怎么处理" in result.search_query
+
+
+def test_action_leading_domain_question_uses_subject_first_search_query():
+    result = apply_intent_hard_rules("如何提升逆变器效率")
+
+    assert result is not None
+    assert result.intent == Intent.knowledge_base_qa
+    assert result.should_use_knowledge_base is True
+    assert result.normalized_question == "如何提升逆变器效率"
+    assert result.search_query == "逆变器效率提升"
 
 
 def test_domain_fault_question_overrides_realtime_term():

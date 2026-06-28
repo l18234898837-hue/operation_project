@@ -42,6 +42,7 @@ class QaReferenceSchema(BaseModel):
     rrf_score: float | None
     rerank_score: float | None
     visible: bool = True
+    usage_note: str | None = None
 
 
 class QaAskResponse(BaseModel):

@@ -31,6 +31,12 @@ def select_evidence_compression_policy(evidence: list[object]) -> EvidenceCompre
     top1 = _rerank_score_at(evidence, 0)
     top2 = _rerank_score_at(evidence, 1)
 
+    if top1 is not None and top1 >= 0.85 and (top2 is None or top1 - top2 >= 0.25):
+        return EvidenceCompressionPolicy(
+            max_items=2,
+            max_chars_per_item=700,
+            reason="dominant_high_confidence_top2",
+        )
     if top1 is not None and top2 is not None and top1 >= 0.85 and top2 >= 0.75:
         return EvidenceCompressionPolicy(
             max_items=2,

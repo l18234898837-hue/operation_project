@@ -44,21 +44,6 @@ async def rewrite_standalone_question(
             used_history=False,
             reason="no_history",
         )
-    if not _needs_history_rewrite(normalized_question):
-        return StandaloneQuestionResult(
-            standalone_question=normalized_question,
-            is_follow_up=False,
-            used_history=False,
-            reason="no_follow_up_signal",
-        )
-    if _is_self_contained_domain_question(normalized_question):
-        return StandaloneQuestionResult(
-            standalone_question=normalized_question,
-            is_follow_up=False,
-            used_history=False,
-            reason="self_contained_domain_question",
-        )
-
     try:
         content = await chat_client.chat(
             messages=build_standalone_question_messages(
@@ -98,6 +83,8 @@ def _contains_any(question: str, terms: tuple[str, ...]) -> bool:
 
 
 def _is_self_contained_domain_question(question: str) -> bool:
+    if _needs_history_rewrite(question):
+        return False
     return _contains_any(question, DOMAIN_TERMS) and _contains_any(
         question,
         SELF_CONTAINED_ACTION_TERMS,

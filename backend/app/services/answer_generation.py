@@ -5,7 +5,11 @@ import re
 import time
 from typing import Protocol
 
-from app.prompts.qa_prompts import build_general_answer_messages, build_rag_answer_messages
+from app.prompts.qa_prompts import (
+    build_general_answer_messages,
+    build_low_confidence_rag_answer_messages,
+    build_rag_answer_messages,
+)
 
 
 class ChatClient(Protocol):
@@ -54,6 +58,34 @@ async def generate_rag_answer(
     return answer
 
 
+async def generate_low_confidence_rag_answer(
+    chat_client: ChatClient,
+    question: str,
+    evidence: list[object],
+    top_score: float | None,
+    diagnostics: dict[str, object] | None = None,
+) -> str:
+    messages = build_low_confidence_rag_answer_messages(
+        question=question,
+        evidence=evidence,
+        top_score=top_score,
+    )
+    _record_generation_input_diagnostics(
+        diagnostics=diagnostics,
+        mode="rag_low_confidence_supplement",
+        messages=messages,
+        evidence=evidence,
+        cautious=True,
+    )
+    start = time.perf_counter()
+    answer = await chat_client.chat(
+        messages=messages,
+        temperature=0.1,
+    )
+    _record_non_stream_output_diagnostics(diagnostics, answer, start)
+    return answer
+
+
 async def stream_rag_answer(
     chat_client: StreamingChatClient,
     question: str,
@@ -72,6 +104,35 @@ async def stream_rag_answer(
         messages=messages,
         evidence=evidence,
         cautious=cautious,
+    )
+    tracker = _StreamDiagnosticsTracker(diagnostics)
+    async for chunk in chat_client.chat_stream(
+        messages=messages,
+        temperature=0.1,
+    ):
+        tracker.record_chunk(chunk)
+        yield chunk
+    tracker.finish()
+
+
+async def stream_low_confidence_rag_answer(
+    chat_client: StreamingChatClient,
+    question: str,
+    evidence: list[object],
+    top_score: float | None,
+    diagnostics: dict[str, object] | None = None,
+) -> AsyncIterator[str]:
+    messages = build_low_confidence_rag_answer_messages(
+        question=question,
+        evidence=evidence,
+        top_score=top_score,
+    )
+    _record_generation_input_diagnostics(
+        diagnostics=diagnostics,
+        mode="rag_low_confidence_supplement",
+        messages=messages,
+        evidence=evidence,
+        cautious=True,
     )
     tracker = _StreamDiagnosticsTracker(diagnostics)
     async for chunk in chat_client.chat_stream(

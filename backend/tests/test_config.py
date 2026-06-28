@@ -2,6 +2,10 @@ import logging
 
 from app.core.config import Settings
 from app.main import create_app
+from app.services.rag_confidence_policy import (
+    LOW_CONFIDENCE_SUPPLEMENT_SCORE,
+    STRONG_RAG_SCORE,
+)
 
 
 def test_settings_reads_rag_configuration(monkeypatch):
@@ -62,6 +66,13 @@ def test_settings_reads_qa_routing_configuration():
     assert settings.qa_intent_model == "deepseek-ai/DeepSeek-V4-Flash"
     assert settings.qa_chat_model == "deepseek-ai/DeepSeek-V4-Flash"
     assert settings.model_api_timeout_seconds == 240
+
+
+def test_settings_uses_rag_confidence_policy_defaults():
+    settings = Settings(_env_file=None)
+
+    assert settings.qa_rerank_min_score == LOW_CONFIDENCE_SUPPLEMENT_SCORE
+    assert settings.qa_rerank_strong_score == STRONG_RAG_SCORE
 
 
 def test_settings_reads_multi_turn_conversation_configuration():

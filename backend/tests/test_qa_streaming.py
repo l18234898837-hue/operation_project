@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 import asyncio
 import json
+import logging
 import uuid
 
 import pytest
@@ -57,13 +58,29 @@ class FakeRetriever:
         return [
             SimpleNamespace(
                 segment_id=str(uuid.uuid4()),
-                document_id=str(uuid.uuid4()),
+                document_id="document-1",
                 heading_path="03_线缆接头与绝缘故障 > 4. 绝缘阻抗问题",
                 clean_text="绝缘阻抗低可能与直流线缆破皮有关。",
                 vector_score=0.6,
                 keyword_score=0.5,
                 rrf_score=0.03,
                 rerank_score=0.9,
+            )
+        ]
+
+
+class LowConfidenceRetriever:
+    async def retrieve(self, query):
+        return [
+            SimpleNamespace(
+                segment_id=str(uuid.uuid4()),
+                document_id="document-1",
+                heading_path="03_线缆接头与绝缘故障 > 5. 端子与接头问题",
+                clean_text="接头松动、氧化或接触不良可能导致温度升高。",
+                vector_score=0.6,
+                keyword_score=0.5,
+                rrf_score=0.03,
+                rerank_score=0.01,
             )
         ]
 
@@ -78,6 +95,15 @@ class FakeStreamingAnswerClient:
 
     async def generate_general(self, question, mode="general"):
         return "通用回答"
+
+
+class LowConfidenceStreamingAnswerClient(FakeStreamingAnswerClient):
+    async def stream_low_confidence_rag(self, question, evidence, top_score):
+        yield "能参考到的资料"
+        yield "结合现场经验的处理建议"
+
+    async def generate_low_confidence_rag(self, question, evidence, top_score):
+        return "能参考到的资料结合现场经验的处理建议"
 
 
 class SlowStreamingAnswerClient(FakeStreamingAnswerClient):
@@ -160,6 +186,72 @@ async def test_stream_qa_events_yields_streamed_answer_delta_before_done():
     assert events.index(status_events[0]) < events.index(answer_events[0])
     assert events.index(answer_events[0]) < done_index
     assert any(isinstance(item, QaSession) for item in session.added)
+
+
+@pytest.mark.asyncio
+async def test_stream_qa_events_streams_low_confidence_supplement_answer():
+    session = FakeSession()
+    dependencies = QaDependencies(
+        understanding_client=FakeUnderstandingClient(),
+        retriever=LowConfidenceRetriever(),
+        answer_client=LowConfidenceStreamingAnswerClient(),
+    )
+
+    events = [
+        event
+        async for event in stream_qa_events(
+            session=session,
+            question="处理前需要注意哪些安全事项？",
+            dependencies=dependencies,
+            min_rerank_score=0.2,
+            strong_rerank_score=0.6,
+            reference_top_k=5,
+        )
+    ]
+
+    answer_events = [event for event in events if "event: answer_delta" in event]
+    done_index = next(
+        index for index, event in enumerate(events) if "event: done" in event
+    )
+
+    assert len(answer_events) == 2
+    assert "能参考到的资料" in answer_events[0]
+    assert "结合现场经验的处理建议" in answer_events[1]
+    assert events.index(answer_events[0]) < done_index
+
+
+@pytest.mark.asyncio
+async def test_stream_qa_events_logs_full_answer_on_sse_finish(caplog):
+    session = FakeSession()
+    dependencies = QaDependencies(
+        understanding_client=FakeUnderstandingClient(),
+        retriever=FakeRetriever(),
+        answer_client=FakeStreamingAnswerClient(),
+    )
+
+    with caplog.at_level(logging.INFO, logger="app.services.qa_streaming"):
+        [
+            event
+            async for event in stream_qa_events(
+                session=session,
+                question="逆变器绝缘阻抗低怎么排查？",
+                dependencies=dependencies,
+                min_rerank_score=0.2,
+                strong_rerank_score=0.6,
+                reference_top_k=5,
+                qa_debug_log_enabled=True,
+            )
+        ]
+
+    payloads = [
+        json.loads(record.message.removeprefix("qa_debug "))
+        for record in caplog.records
+        if record.message.startswith("qa_debug ")
+    ]
+    finish = next(payload for payload in payloads if payload["event"] == "qa.sse.finish")
+
+    assert finish["answer"] == "第一段第二段"
+    assert "answer_preview" not in finish
 
 
 @pytest.mark.asyncio

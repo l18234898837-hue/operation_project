@@ -4,6 +4,7 @@ import pytest
 
 from app.services.answer_generation import (
     generate_general_answer,
+    generate_low_confidence_rag_answer,
     generate_rag_answer,
     stream_rag_answer,
 )
@@ -73,6 +74,32 @@ async def test_generate_rag_answer_adds_cautious_instruction_when_requested():
     system_prompt = client.calls[0]["messages"][0]["content"]
     assert "谨慎语气" in system_prompt
     assert "根据当前知识库中相关片段" in system_prompt
+
+
+@pytest.mark.asyncio
+async def test_generate_low_confidence_rag_answer_marks_supplemental_advice():
+    evidence = [
+        SimpleNamespace(
+            heading_path="06_发电量异常与效率损失 > 2.2 组件遮挡",
+            clean_text="组件遮挡可能导致组串发电量偏低。",
+            rerank_score=0.18,
+        )
+    ]
+    client = FakeChatClient("先说明能参考到的资料，再给结合现场经验的处理建议。")
+
+    await generate_low_confidence_rag_answer(
+        chat_client=client,
+        question="最后帮我整理一个现场排查清单。",
+        evidence=evidence,
+        top_score=0.18,
+    )
+
+    joined = "\n".join(message["content"] for message in client.calls[0]["messages"])
+    assert "能参考到的资料" in joined
+    assert "结合现场经验的处理建议" in joined
+    assert "模型补充建议" not in joined
+    assert "通用光伏运维经验" in joined
+    assert "低置信" in joined
 
 
 @pytest.mark.asyncio

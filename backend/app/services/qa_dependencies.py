@@ -5,8 +5,10 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.services.answer_generation import (
     generate_general_answer,
+    generate_low_confidence_rag_answer,
     generate_rag_answer,
     stream_general_answer,
+    stream_low_confidence_rag_answer,
     stream_rag_answer,
 )
 from app.services.conversation_context import ConversationContext
@@ -102,6 +104,22 @@ class RealAnswerClient:
             diagnostics=diagnostics,
         )
 
+    async def generate_low_confidence_rag(
+        self,
+        question: str,
+        evidence: list[object],
+        top_score: float | None,
+    ) -> str:
+        diagnostics: dict[str, object] = {}
+        self.last_diagnostics = diagnostics
+        return await generate_low_confidence_rag_answer(
+            chat_client=self._chat_client,
+            question=question,
+            evidence=evidence,
+            top_score=top_score,
+            diagnostics=diagnostics,
+        )
+
     async def stream_rag(
         self,
         question: str,
@@ -126,6 +144,23 @@ class RealAnswerClient:
             chat_client=self._chat_client,
             question=question,
             mode=mode,
+            diagnostics=diagnostics,
+        ):
+            yield chunk
+
+    async def stream_low_confidence_rag(
+        self,
+        question: str,
+        evidence: list[object],
+        top_score: float | None,
+    ):
+        diagnostics: dict[str, object] = {}
+        self.last_diagnostics = diagnostics
+        async for chunk in stream_low_confidence_rag_answer(
+            chat_client=self._chat_client,
+            question=question,
+            evidence=evidence,
+            top_score=top_score,
             diagnostics=diagnostics,
         ):
             yield chunk

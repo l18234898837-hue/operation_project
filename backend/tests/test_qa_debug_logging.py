@@ -45,6 +45,25 @@ def test_log_qa_debug_event_outputs_structured_json_with_preview(caplog):
     assert "question" not in payload
 
 
+def test_log_qa_debug_event_outputs_full_answer_for_copying(caplog):
+    logger = logging.getLogger("test.qa_debug.answer")
+    answer = "第一行回答\n第二行回答，包含完整处理建议。"
+
+    with caplog.at_level(logging.INFO, logger=logger.name):
+        log_qa_debug_event(
+            logger=logger,
+            enabled=True,
+            event="qa.request.finish",
+            preview_chars=4,
+            answer=answer,
+        )
+
+    payload = json.loads(caplog.records[0].message.removeprefix("qa_debug "))
+
+    assert payload["answer"] == answer
+    assert "answer_preview" not in payload
+
+
 def test_log_qa_debug_event_compacts_evidence_preview(caplog):
     logger = logging.getLogger("test.qa_debug.evidence_preview")
     evidence = [

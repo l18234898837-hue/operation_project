@@ -2,7 +2,7 @@ import asyncio
 
 import pytest
 
-from app.services.qa_streaming import _StreamingAnswerClient
+from app.services.qa_streaming import QUEUE_DONE, _StreamingAnswerClient
 
 
 class FakeGeneralStreamingAnswerClient:
@@ -23,6 +23,6 @@ async def test_streaming_answer_client_streams_general_answers():
     answer = await client.generate_general("hello", mode="chitchat")
 
     assert answer == "hello there"
-    assert await queue.get() == "hello "
-    assert await queue.get() == "there"
-    assert await queue.get() is None
+    assert await queue.get() == {"event": "answer_delta", "text": "hello "}
+    assert await queue.get() == {"event": "answer_delta", "text": "there"}
+    assert await queue.get() == {"event": QUEUE_DONE}

@@ -86,6 +86,20 @@ GENERATION_IMPACT_TERMS = (
     "效率低",
 )
 
+EFFICIENCY_TERMS = (
+    "效率",
+    "转换效率",
+)
+
+IMPROVEMENT_ACTION_TERMS = (
+    "提升",
+    "提高",
+    "优化",
+    "改善",
+)
+
+QUESTION_PREFIX_PATTERN = r"^(如何|怎么|怎样|该怎么|请问|请|帮我|能否|能不能|可以怎样)"
+
 ENVIRONMENT_TERMS = (
     "低辐照",
     "辐照",
@@ -106,8 +120,20 @@ FOLLOW_UP_TERMS = (
     "该问题",
 )
 
+CONSOLIDATION_FOLLOW_UP_TERMS = (
+    "处理建议",
+    "现场建议",
+    "现场处理",
+    "运维人员能看懂",
+    "能看懂",
+    "整理成",
+    "总结一下",
+    "给我一个",
+)
+
 REWRITE_FOLLOW_UP_TERMS = (
     *FOLLOW_UP_TERMS,
+    *CONSOLIDATION_FOLLOW_UP_TERMS,
     "那个",
     "那",
     "那么",
@@ -117,6 +143,9 @@ REWRITE_FOLLOW_UP_TERMS = (
     "上一轮",
     "上一个",
     "前一个",
+    "告警还在",
+    "下一步",
+    "最后怎么处理",
 )
 
 CHITCHAT_EXACT_TERMS = (
