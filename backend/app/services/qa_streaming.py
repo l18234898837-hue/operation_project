@@ -19,8 +19,23 @@ STATUS_UNDERSTANDING = "understanding"
 STATUS_REWRITING = "rewriting"
 STATUS_RETRIEVING = "retrieving"
 STATUS_GENERATING = "generating"
+STATUS_CONTEXT = "context"
+STATUS_EVIDENCE_READY = "evidence_ready"
+STATUS_LOW_CONFIDENCE = "low_confidence"
+STATUS_QUICK_REPLY = "quick_reply"
 STATUS_DONE = "done"
 STATUS_ERROR = "error"
+STATUS_HEARTBEAT = "heartbeat"
+QUEUE_DONE = "__done__"
+HEARTBEAT_INTERVAL_SECONDS = 2.0
+HEARTBEAT_MESSAGES = (
+    "正在分析问题中的设备、故障和场景信息...",
+    "正在确认是否需要结合历史对话...",
+    "正在提取检索关键词...",
+    "正在匹配相关设备和故障条目...",
+    "正在筛选更可靠的证据片段...",
+    "正在把资料整理成更易执行的建议...",
+)
 
 
 def format_sse_event(event: str, data: dict[str, Any]) -> str:
@@ -58,23 +73,8 @@ async def stream_qa_events(
         question_length=len(question),
     )
     try:
-        yield format_sse_event(
-            "status",
-            {"stage": STATUS_REWRITING, "message": "正在理解追问上下文"},
-        )
-        yield format_sse_event(
-            "status",
-            {"stage": STATUS_UNDERSTANDING, "message": "正在识别问题意图"},
-        )
-        yield format_sse_event(
-            "status",
-            {"stage": STATUS_RETRIEVING, "message": "正在检索知识库"},
-        )
-        yield format_sse_event(
-            "status",
-            {"stage": STATUS_GENERATING, "message": "正在生成答案"},
-        )
-        queue: asyncio.Queue[str | None] = asyncio.Queue()
+        queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        heartbeat = _HeartbeatState()
         streaming_dependencies = _with_streaming_answer_client(dependencies, queue)
         answer_task = asyncio.create_task(
             answer_question(
@@ -101,11 +101,32 @@ async def stream_qa_events(
             if answer_task.done() and queue.empty():
                 break
             try:
-                chunk = await asyncio.wait_for(queue.get(), timeout=0.1)
+                item = await asyncio.wait_for(
+                    queue.get(),
+                    timeout=heartbeat.timeout_seconds(),
+                )
             except asyncio.TimeoutError:
+                heartbeat_event = heartbeat.next_event()
+                if heartbeat_event is not None:
+                    yield heartbeat_event
                 continue
-            if chunk is None:
+            if item.get("event") == QUEUE_DONE:
                 continue
+            if item.get("event") == "status":
+                heartbeat.reset()
+                yield format_sse_event(
+                    "status",
+                    {
+                        "stage": item.get("stage"),
+                        "message": item.get("message"),
+                        **dict(item.get("extra") or {}),
+                    },
+                )
+                continue
+            chunk = str(item.get("text") or "")
+            if not chunk:
+                continue
+            heartbeat.reset()
             if not first_delta_sent:
                 first_delta_sent = True
                 _log_stream_debug(
@@ -179,7 +200,7 @@ def _response_tail_events(response: QaAskResponse) -> list[str]:
 
 def _with_streaming_answer_client(
     dependencies: QaDependencies,
-    queue: asyncio.Queue[str | None],
+    queue: asyncio.Queue[dict[str, Any]],
 ) -> QaDependencies:
     return QaDependencies(
         understanding_client=dependencies.understanding_client,
@@ -187,13 +208,67 @@ def _with_streaming_answer_client(
         answer_client=_StreamingAnswerClient(dependencies.answer_client, queue),
         context_rewriter=dependencies.context_rewriter,
         session_summarizer=dependencies.session_summarizer,
+        progress_callback=_progress_callback(queue),
     )
 
 
+def _progress_callback(queue: asyncio.Queue[dict[str, Any]]):
+    async def _callback(
+        stage: str,
+        message: str,
+        extra: dict[str, object] | None = None,
+    ) -> None:
+        await queue.put(
+            {
+                "event": "status",
+                "stage": stage,
+                "message": message,
+                "extra": extra or {},
+            }
+        )
+
+    return _callback
+
+
+class _HeartbeatState:
+    def __init__(self) -> None:
+        self._last_activity = time.perf_counter()
+        self._index = 0
+
+    def reset(self) -> None:
+        self._last_activity = time.perf_counter()
+        self._index = 0
+
+    def timeout_seconds(self) -> float:
+        elapsed = time.perf_counter() - self._last_activity
+        return max(0.1, HEARTBEAT_INTERVAL_SECONDS - elapsed)
+
+    def next_event(self) -> str | None:
+        now = time.perf_counter()
+        if now - self._last_activity < HEARTBEAT_INTERVAL_SECONDS:
+            return None
+        message = HEARTBEAT_MESSAGES[self._index % len(HEARTBEAT_MESSAGES)]
+        self._index += 1
+        self._last_activity = now
+        return format_sse_event(
+            "status",
+            {
+                "stage": STATUS_HEARTBEAT,
+                "message": message,
+                "heartbeat": True,
+            },
+        )
+
+
 class _StreamingAnswerClient:
-    def __init__(self, wrapped: object, queue: asyncio.Queue[str | None]) -> None:
+    def __init__(self, wrapped: object, queue: asyncio.Queue[dict[str, Any]]) -> None:
         self._wrapped = wrapped
         self._queue = queue
+
+    @property
+    def last_diagnostics(self) -> dict[str, object]:
+        diagnostics = getattr(self._wrapped, "last_diagnostics", None)
+        return diagnostics if isinstance(diagnostics, dict) else {}
 
     async def generate_rag(
         self,
@@ -204,21 +279,30 @@ class _StreamingAnswerClient:
         stream_rag = getattr(self._wrapped, "stream_rag", None)
         if stream_rag is None:
             answer = await self._wrapped.generate_rag(question, evidence, cautious)
-            await self._queue.put(answer)
-            await self._queue.put(None)
+            await self._queue.put({"event": "answer_delta", "text": answer})
+            await self._queue.put({"event": QUEUE_DONE})
             return answer
 
         parts: list[str] = []
         async for chunk in stream_rag(question, evidence, cautious):
             parts.append(chunk)
-            await self._queue.put(chunk)
-        await self._queue.put(None)
+            await self._queue.put({"event": "answer_delta", "text": chunk})
+        await self._queue.put({"event": QUEUE_DONE})
         return "".join(parts)
 
-    async def generate_general(self, question: str) -> str:
-        answer = await self._wrapped.generate_general(question)
-        await self._queue.put(answer)
-        await self._queue.put(None)
+    async def generate_general(self, question: str, mode: str = "general") -> str:
+        stream_general = getattr(self._wrapped, "stream_general", None)
+        if stream_general is not None:
+            parts: list[str] = []
+            async for chunk in stream_general(question, mode=mode):
+                parts.append(chunk)
+                await self._queue.put({"event": "answer_delta", "text": chunk})
+            await self._queue.put({"event": QUEUE_DONE})
+            return "".join(parts)
+
+        answer = await self._wrapped.generate_general(question, mode=mode)
+        await self._queue.put({"event": "answer_delta", "text": answer})
+        await self._queue.put({"event": QUEUE_DONE})
         return answer
 
 

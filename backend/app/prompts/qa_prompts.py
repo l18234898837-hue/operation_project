@@ -9,21 +9,26 @@ def build_intent_messages(question: str) -> list[dict[str, str]]:
         {
             "role": "system",
             "content": (
-                "你只做意图识别，是光伏运维知识库问答系统的查询理解模块。"
-                "只输出 JSON，不要回答用户问题。"
-                "必须保留原意、设备名称、故障码、型号、英文缩写和技术术语。"
-                "intent 只能是 knowledge_base_qa、general_explanation、out_of_scope、"
-                "realtime_external、invalid_input。"
-                "例如：今天上海天气怎么样？属于 realtime_external；"
-                "什么是无功功率？通常属于 general_explanation。"
+                "你是光伏运维问答系统的意图分类器。"
+                "只输出一个 JSON 对象，不要 Markdown，不要代码块，不要解释，不要回答用户问题。"
+                "JSON 字段只能包含 intent 和 confidence。"
+                "intent 只能是 knowledge_base_qa、general_explanation、chitchat、"
+                "out_of_scope、realtime_external、invalid_input。"
+                "分类规则：光伏电站、组件、逆变器、组串、箱变、发电量、故障、报警、"
+                "排查、维护相关为 knowledge_base_qa；光伏或电力基础概念解释为 "
+                "general_explanation；问候、感谢、寒暄为 chitchat；天气、新闻、股价、"
+                "价格、汇率、当前时间等实时外部信息为 realtime_external；空内容、乱码、"
+                "无法理解为 invalid_input；与光伏运维无关为 out_of_scope。"
+                "示例：逆变器漏电流报警怎么处理 -> knowledge_base_qa；"
+                "什么是无功功率 -> general_explanation；今天上海天气怎么样 -> "
+                "realtime_external；帮我写一首诗 -> out_of_scope；你好 -> chitchat。"
             ),
         },
         {
             "role": "user",
             "content": (
-                "请识别用户问题意图并改写检索 query，输出字段："
-                "intent, confidence, should_use_knowledge_base, normalized_question, "
-                f"search_query, reason。\n用户问题：{question}"
+                "输出格式：{\"intent\":\"knowledge_base_qa\",\"confidence\":0.9}\n"
+                f"用户问题：{question}"
             ),
         },
     ]
@@ -52,14 +57,33 @@ def build_rag_answer_messages(
     ]
 
 
-def build_general_answer_messages(question: str) -> list[dict[str, str]]:
+def build_general_answer_messages(
+    question: str,
+    mode: str = "general",
+) -> list[dict[str, str]]:
+    if mode == "chitchat":
+        system_prompt = (
+            "你是光伏电站运维知识助手。用户正在进行简短寒暄或礼貌表达。"
+            "请用专业、友好、简洁的语气自然回应，并引导用户提出光伏运维相关问题。"
+            "不要声称查询了知识库，不要展开技术长文。"
+        )
+    elif mode == "realtime_external":
+        system_prompt = (
+            "你是光伏电站运维知识助手。当前系统未接入实时外部数据源，"
+            "本次回答不基于项目知识库，也不能给出天气、新闻、股价、价格、汇率等实时事实结论。"
+            "请先明确说明这个边界，再提供与光伏运维相关的一般性替代建议；"
+            "如果问题与光伏运维无关，请简洁说明可协助的范围。"
+        )
+    else:
+        system_prompt = (
+            "你是通用问答助手。本次回答不引用项目知识库。"
+            "回答要简洁、准确，不要声称来自项目知识库。"
+        )
+
     return [
         {
             "role": "system",
-            "content": (
-                "你是通用问答助手。本次回答不引用项目知识库。"
-                "回答要简洁、准确，不要声称来自项目知识库。"
-            ),
+            "content": system_prompt,
         },
         {"role": "user", "content": question},
     ]

@@ -1,7 +1,13 @@
+import sys
 import pytest
 import uuid
+from pathlib import Path
 from pydantic import ValidationError
 from fastapi.testclient import TestClient
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from app.main import create_app
 from app.schemas.qa import QaAskRequest, QaAskResponse, QaReferenceSchema
@@ -67,6 +73,7 @@ def test_qa_response_supports_answer_types(answer_type):
     [
         "knowledge_base_qa",
         "general_explanation",
+        "chitchat",
         "out_of_scope",
         "realtime_external",
         "invalid_input",

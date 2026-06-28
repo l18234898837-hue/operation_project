@@ -37,6 +37,28 @@ async def test_rewrite_standalone_question_parses_json_result():
 
 
 @pytest.mark.asyncio
+async def test_rewrite_standalone_question_skips_llm_without_follow_up_signal():
+    context = ConversationContext(
+        session_summary={"summary": "用户在排查逆变器绝缘阻抗低"},
+        recent_turns=[{"question": "逆变器绝缘阻抗低怎么排查？"}],
+        used_history=True,
+    )
+    client = FakeChatClient("{}")
+
+    result = await rewrite_standalone_question(
+        "项目知识库里有哪些运维内容？",
+        context,
+        client,
+    )
+
+    assert result.standalone_question == "项目知识库里有哪些运维内容？"
+    assert result.is_follow_up is False
+    assert result.used_history is False
+    assert result.reason == "no_follow_up_signal"
+    assert client.calls == []
+
+
+@pytest.mark.asyncio
 async def test_rewrite_standalone_question_falls_back_to_original_on_error():
     context = ConversationContext(
         session_summary={"summary": "历史"},
@@ -45,7 +67,7 @@ async def test_rewrite_standalone_question_falls_back_to_original_on_error():
     )
     client = FakeChatClient("not json")
 
-    result = await rewrite_standalone_question("当前问题", context, client)
+    result = await rewrite_standalone_question("那当前问题呢？", context, client)
 
-    assert result.standalone_question == "当前问题"
+    assert result.standalone_question == "那当前问题呢？"
     assert result.reason == "rewrite_fallback_after_llm_failure"

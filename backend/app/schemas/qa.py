@@ -10,6 +10,7 @@ AnswerTypeLiteral = Literal["rag", "general_llm", "refused", "none"]
 IntentLiteral = Literal[
     "knowledge_base_qa",
     "general_explanation",
+    "chitchat",
     "out_of_scope",
     "realtime_external",
     "invalid_input",

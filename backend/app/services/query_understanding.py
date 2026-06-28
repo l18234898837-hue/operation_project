@@ -8,7 +8,22 @@ from typing import Any, Protocol
 
 from app.prompts.qa_prompts import build_intent_messages
 from app.services.keyword_index import normalize_query
-from app.services.routing_terms import DOMAIN_TERMS, FAULT_ACTION_TERMS, REALTIME_TERMS
+from app.services.routing_terms import (
+    CHITCHAT_EXACT_TERMS,
+    CHITCHAT_PATTERNS,
+    DOMAIN_TERMS,
+    ENVIRONMENT_TERMS,
+    FAULT_ACTION_TERMS,
+    FAULT_CODE_PATTERNS,
+    FOLLOW_UP_TERMS,
+    GENERATION_IMPACT_TERMS,
+    LOCATION_TERMS,
+    ALWAYS_REALTIME_EXTERNAL_TERMS,
+    REALTIME_DATE_TERMS,
+    REALTIME_TERMS,
+    STRONG_DOMAIN_TERMS,
+    WEATHER_TERMS,
+)
 
 
 class ChatClient(Protocol):
@@ -23,6 +38,7 @@ class ChatClient(Protocol):
 class Intent(str, Enum):
     knowledge_base_qa = "knowledge_base_qa"
     general_explanation = "general_explanation"
+    chitchat = "chitchat"
     out_of_scope = "out_of_scope"
     realtime_external = "realtime_external"
     invalid_input = "invalid_input"
@@ -41,6 +57,7 @@ class QueryUnderstandingResult:
 
 _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(?P<body>.*?)```", re.IGNORECASE | re.DOTALL)
 _MEANINGFUL_TEXT_RE = re.compile(r"[A-Za-z0-9\u4e00-\u9fff]")
+_CHITCHAT_EXACT_TERM_SET = {term.lower() for term in CHITCHAT_EXACT_TERMS}
 
 
 def apply_intent_hard_rules(
@@ -59,7 +76,29 @@ def apply_intent_hard_rules(
             reason="hard_rule_invalid_input",
         )
 
-    if _has_domain_fault_action(normalized):
+    if _is_chitchat(normalized):
+        return QueryUnderstandingResult(
+            intent=Intent.chitchat,
+            confidence=1.0,
+            should_use_knowledge_base=False,
+            normalized_question=normalized,
+            search_query="",
+            refusal_reason=None,
+            reason="hard_rule_chitchat",
+        )
+
+    if _is_realtime_external(normalized):
+        return QueryUnderstandingResult(
+            intent=Intent.realtime_external,
+            confidence=1.0,
+            should_use_knowledge_base=False,
+            normalized_question=normalized,
+            search_query="",
+            refusal_reason=None,
+            reason="hard_rule_realtime_external",
+        )
+
+    if _should_route_to_knowledge_base(normalized):
         return QueryUnderstandingResult(
             intent=Intent.knowledge_base_qa,
             confidence=1.0,
@@ -70,14 +109,14 @@ def apply_intent_hard_rules(
             reason="hard_rule_domain_fault_action",
         )
 
-    if _contains_any(normalized, REALTIME_TERMS):
+    if _is_realtime_external(normalized):
         return QueryUnderstandingResult(
             intent=Intent.realtime_external,
             confidence=1.0,
             should_use_knowledge_base=False,
             normalized_question=normalized,
             search_query="",
-            refusal_reason="realtime_external",
+            refusal_reason=None,
             reason="hard_rule_realtime_external",
         )
 
@@ -161,44 +200,14 @@ def post_validate_understanding(
     return model_result
 
 
-def _build_intent_messages(question: str) -> list[dict[str, str]]:
-    return [
-        {
-            "role": "system",
-            "content": (
-                "你只做意图识别，是光伏运维知识库问答系统的查询理解模块。"
-                "只输出 JSON，不要回答用户问题。"
-                "必须保留原意、设备名称、故障码、型号、英文缩写和技术术语。"
-                "intent 只能是 knowledge_base_qa、general_explanation、out_of_scope、"
-                "realtime_external、invalid_input。"
-                "例如：今天上海天气怎么样？属于 realtime_external；"
-                "什么是无功功率？通常属于 general_explanation。"
-            ),
-        },
-        {
-            "role": "user",
-            "content": (
-                "请识别用户问题意图并改写检索 query，输出字段："
-                "intent, confidence, should_use_knowledge_base, normalized_question, "
-                f"search_query, reason。\n用户问题：{question}"
-            ),
-        },
-    ]
-
-
 def _parse_model_result(content: str, fallback_question: str) -> QueryUnderstandingResult:
     payload = _load_json_from_content(content)
     intent = _coerce_intent(payload.get("intent"))
-    normalized_question = normalize_query(str(payload.get("normalized_question") or fallback_question))
-    search_query = normalize_query(str(payload.get("search_query") or ""))
+    normalized_question = normalize_query(fallback_question)
     confidence = _coerce_confidence(payload.get("confidence"))
-    should_use_knowledge_base = payload.get("should_use_knowledge_base")
-    if not isinstance(should_use_knowledge_base, bool):
-        should_use_knowledge_base = intent == Intent.knowledge_base_qa
-    refusal_reason = payload.get("refusal_reason")
-    if not isinstance(refusal_reason, str):
-        refusal_reason = intent.value if intent in _REFUSAL_INTENTS else None
-    reason = payload.get("reason")
+    should_use_knowledge_base = intent == Intent.knowledge_base_qa
+    search_query = normalized_question if should_use_knowledge_base else ""
+    refusal_reason = intent.value if intent in _REFUSAL_INTENTS else None
 
     return QueryUnderstandingResult(
         intent=intent,
@@ -207,7 +216,7 @@ def _parse_model_result(content: str, fallback_question: str) -> QueryUnderstand
         normalized_question=normalized_question,
         search_query=search_query,
         refusal_reason=refusal_reason,
-        reason=str(reason or "llm_intent_classification"),
+        reason="llm_intent_classification",
     )
 
 
@@ -265,12 +274,53 @@ def _contains_any(question: str, terms: tuple[str, ...]) -> bool:
     return any(term.lower() in question_lower for term in terms)
 
 
+def _matches_any_pattern(question: str, patterns: tuple[str, ...]) -> bool:
+    return any(re.search(pattern, question, re.IGNORECASE) for pattern in patterns)
+
+
+def _is_chitchat(question: str) -> bool:
+    if _contains_any(question, DOMAIN_TERMS):
+        return False
+    question_lower = question.lower()
+    if question_lower in _CHITCHAT_EXACT_TERM_SET:
+        return True
+    return _matches_any_pattern(question, CHITCHAT_PATTERNS)
+
+
+def _is_realtime_external(question: str) -> bool:
+    if _contains_any(question, ALWAYS_REALTIME_EXTERNAL_TERMS):
+        return True
+    if (
+        _contains_any(question, WEATHER_TERMS)
+        and (
+            _contains_any(question, REALTIME_DATE_TERMS)
+            or _contains_any(question, LOCATION_TERMS)
+        )
+    ):
+        return True
+    return _contains_any(question, REALTIME_TERMS) and not _contains_any(question, DOMAIN_TERMS)
+
+
+def _should_route_to_knowledge_base(question: str) -> bool:
+    if _contains_any(question, FOLLOW_UP_TERMS):
+        return False
+    if _matches_any_pattern(question, FAULT_CODE_PATTERNS):
+        return True
+    if _contains_any(question, STRONG_DOMAIN_TERMS):
+        return True
+    if _has_domain_fault_action(question):
+        return True
+    return _contains_any(question, ENVIRONMENT_TERMS) and _contains_any(
+        question,
+        GENERATION_IMPACT_TERMS,
+    )
+
+
 def _has_domain_fault_action(question: str) -> bool:
     return _contains_any(question, DOMAIN_TERMS) and _contains_any(question, FAULT_ACTION_TERMS)
 
 
 _REFUSAL_INTENTS = {
     Intent.invalid_input,
-    Intent.realtime_external,
     Intent.out_of_scope,
 }

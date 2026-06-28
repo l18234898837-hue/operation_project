@@ -6,6 +6,7 @@ from app.core.config import settings
 from app.services.answer_generation import (
     generate_general_answer,
     generate_rag_answer,
+    stream_general_answer,
     stream_rag_answer,
 )
 from app.services.conversation_context import ConversationContext
@@ -51,8 +52,11 @@ class RealRetriever:
         self._session = session
         self._embedding_client = embedding_client
         self._rerank_client = rerank_client
+        self.last_diagnostics: dict[str, object] = {}
 
     async def retrieve(self, query: str) -> list[object]:
+        diagnostics: dict[str, object] = {}
+        self.last_diagnostics = diagnostics
         return await retrieve_evidence(
             session=self._session,
             query=query,
@@ -63,12 +67,14 @@ class RealRetriever:
             rrf_top_k=settings.retrieval_rrf_top_k,
             final_top_k=settings.retrieval_final_top_k,
             rrf_k=settings.retrieval_rrf_k,
+            diagnostics=diagnostics,
         )
 
 
 class RealAnswerClient:
     def __init__(self, chat_client: SiliconFlowChatClient) -> None:
         self._chat_client = chat_client
+        self.last_diagnostics: dict[str, object] = {}
 
     async def generate_rag(
         self,
@@ -76,17 +82,24 @@ class RealAnswerClient:
         evidence: list[object],
         cautious: bool,
     ) -> str:
+        diagnostics: dict[str, object] = {}
+        self.last_diagnostics = diagnostics
         return await generate_rag_answer(
             chat_client=self._chat_client,
             question=question,
             evidence=evidence,
             cautious=cautious,
+            diagnostics=diagnostics,
         )
 
-    async def generate_general(self, question: str) -> str:
+    async def generate_general(self, question: str, mode: str = "general") -> str:
+        diagnostics: dict[str, object] = {}
+        self.last_diagnostics = diagnostics
         return await generate_general_answer(
             chat_client=self._chat_client,
             question=question,
+            mode=mode,
+            diagnostics=diagnostics,
         )
 
     async def stream_rag(
@@ -95,11 +108,25 @@ class RealAnswerClient:
         evidence: list[object],
         cautious: bool,
     ):
+        diagnostics: dict[str, object] = {}
+        self.last_diagnostics = diagnostics
         async for chunk in stream_rag_answer(
             chat_client=self._chat_client,
             question=question,
             evidence=evidence,
             cautious=cautious,
+            diagnostics=diagnostics,
+        ):
+            yield chunk
+
+    async def stream_general(self, question: str, mode: str = "general"):
+        diagnostics: dict[str, object] = {}
+        self.last_diagnostics = diagnostics
+        async for chunk in stream_general_answer(
+            chat_client=self._chat_client,
+            question=question,
+            mode=mode,
+            diagnostics=diagnostics,
         ):
             yield chunk
 

@@ -11,8 +11,13 @@ def test_intent_prompt_requires_json_and_no_answering():
     messages = build_intent_messages("什么是无功功率？")
     joined = "\n".join(message["content"] for message in messages)
 
-    assert "只输出 JSON" in joined
+    assert "只输出一个 JSON 对象" in joined
+    assert "不要 Markdown" in joined
+    assert "不要代码块" in joined
     assert "不要回答用户问题" in joined
+    assert "字段只能包含 intent 和 confidence" in joined
+    assert "search_query" not in joined
+    assert "reason" not in joined
     assert "什么是无功功率？" in joined
 
 

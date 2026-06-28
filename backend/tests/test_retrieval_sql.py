@@ -216,6 +216,52 @@ async def test_retrieve_evidence_applies_rerank_order_and_scores():
     ]
 
 
+@pytest.mark.asyncio
+async def test_retrieve_evidence_records_stage_diagnostics():
+    segment_a = make_segment("a", "doc-1", "Root > A", "indexed A", "clean A")
+    diagnostics = {}
+
+    evidence = await retrieve_evidence(
+        session=FakeSession(
+            vector_rows=[SimpleNamespace(segment_id="a", score=0.9, rank=1)],
+            keyword_rows=[SimpleNamespace(segment_id="a", score=8.0, rank=1)],
+            segments=[segment_a],
+        ),
+        query="inverter fault",
+        embedding_client=FakeEmbeddingClient(),
+        rerank_client=FakeRerankClient([SimpleNamespace(index=0, score=0.91)]),
+        vector_top_k=2,
+        keyword_top_k=2,
+        rrf_top_k=3,
+        final_top_k=2,
+        rrf_k=60,
+        diagnostics=diagnostics,
+    )
+
+    assert [chunk.segment_id for chunk in evidence] == ["a"]
+    assert diagnostics["vector_rows_count"] == 1
+    assert diagnostics["keyword_rows_count"] == 1
+    assert diagnostics["fused_count"] == 1
+    assert diagnostics["loaded_segments_count"] == 1
+    assert diagnostics["rerank_enabled"] is True
+    assert diagnostics["rerank_documents_count"] == 1
+    assert diagnostics["rerank_results_count"] == 1
+    assert diagnostics["result_count"] == 1
+    for key in {
+        "query_prepare_ms",
+        "embedding_ms",
+        "vector_search_ms",
+        "keyword_search_ms",
+        "rrf_ms",
+        "load_segments_ms",
+        "rerank_ms",
+        "build_evidence_ms",
+        "total_internal_ms",
+    }:
+        assert key in diagnostics
+        assert diagnostics[key] >= 0
+
+
 def test_query_script_imports_safely_without_executing_main():
     import backend.scripts.query_knowledge_base as query_script
 

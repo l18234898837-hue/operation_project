@@ -7,6 +7,11 @@ from app.prompts.qa_prompts import build_standalone_question_messages
 from app.services.conversation_context import ConversationContext
 from app.services.json_model_output import load_json_object
 from app.services.keyword_index import normalize_query
+from app.services.routing_terms import (
+    DOMAIN_TERMS,
+    REWRITE_FOLLOW_UP_TERMS,
+    SELF_CONTAINED_ACTION_TERMS,
+)
 
 
 class ChatClient(Protocol):
@@ -39,6 +44,20 @@ async def rewrite_standalone_question(
             used_history=False,
             reason="no_history",
         )
+    if not _needs_history_rewrite(normalized_question):
+        return StandaloneQuestionResult(
+            standalone_question=normalized_question,
+            is_follow_up=False,
+            used_history=False,
+            reason="no_follow_up_signal",
+        )
+    if _is_self_contained_domain_question(normalized_question):
+        return StandaloneQuestionResult(
+            standalone_question=normalized_question,
+            is_follow_up=False,
+            used_history=False,
+            reason="self_contained_domain_question",
+        )
 
     try:
         content = await chat_client.chat(
@@ -66,3 +85,20 @@ async def rewrite_standalone_question(
             used_history=False,
             reason="rewrite_fallback_after_llm_failure",
         )
+
+
+def _needs_history_rewrite(question: str) -> bool:
+    question_lower = question.lower()
+    return any(term.lower() in question_lower for term in REWRITE_FOLLOW_UP_TERMS)
+
+
+def _contains_any(question: str, terms: tuple[str, ...]) -> bool:
+    question_lower = question.lower()
+    return any(term.lower() in question_lower for term in terms)
+
+
+def _is_self_contained_domain_question(question: str) -> bool:
+    return _contains_any(question, DOMAIN_TERMS) and _contains_any(
+        question,
+        SELF_CONTAINED_ACTION_TERMS,
+    )

@@ -106,6 +106,24 @@ def test_settings_reads_qa_debug_logging_configuration():
     assert settings.qa_debug_evidence_preview_enabled is True
 
 
+def test_settings_reads_database_pool_configuration():
+    settings = Settings(
+        db_pool_size="7",
+        db_max_overflow="13",
+        db_pool_timeout_seconds="9",
+        db_pool_recycle_seconds="600",
+        db_pool_pre_ping="false",
+        db_connection_prewarm_enabled="false",
+    )
+
+    assert settings.db_pool_size == 7
+    assert settings.db_max_overflow == 13
+    assert settings.db_pool_timeout_seconds == 9
+    assert settings.db_pool_recycle_seconds == 600
+    assert settings.db_pool_pre_ping is False
+    assert settings.db_connection_prewarm_enabled is False
+
+
 def test_create_app_configures_app_logger_for_info_output():
     app_logger = logging.getLogger("app.services.qa_service")
     app_logger.handlers.clear()

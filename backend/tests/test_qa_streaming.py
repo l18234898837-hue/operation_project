@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+import asyncio
 import json
 import uuid
 
@@ -75,8 +76,14 @@ class FakeStreamingAnswerClient:
     async def generate_rag(self, question, evidence, cautious):
         return "第一段第二段"
 
-    async def generate_general(self, question):
+    async def generate_general(self, question, mode="general"):
         return "通用回答"
+
+
+class SlowStreamingAnswerClient(FakeStreamingAnswerClient):
+    async def stream_rag(self, question, evidence, cautious):
+        await asyncio.sleep(2.2)
+        yield "慢速回答"
 
 
 def test_format_sse_event_outputs_valid_sse_frame():
@@ -139,12 +146,52 @@ async def test_stream_qa_events_yields_streamed_answer_delta_before_done():
     ]
 
     answer_events = [event for event in events if "event: answer_delta" in event]
+    status_events = [event for event in events if "event: status" in event]
     done_index = next(
         index for index, event in enumerate(events) if "event: done" in event
     )
 
+    assert status_events
+    assert any("正在查找光伏运维知识库" in event for event in status_events)
+    assert any("已找到" in event for event in status_events)
     assert len(answer_events) == 2
     assert "第一段" in answer_events[0]
     assert "第二段" in answer_events[1]
+    assert events.index(status_events[0]) < events.index(answer_events[0])
     assert events.index(answer_events[0]) < done_index
     assert any(isinstance(item, QaSession) for item in session.added)
+
+
+@pytest.mark.asyncio
+async def test_stream_qa_events_emits_heartbeat_while_waiting_for_answer():
+    session = FakeSession()
+    dependencies = QaDependencies(
+        understanding_client=FakeUnderstandingClient(),
+        retriever=FakeRetriever(),
+        answer_client=SlowStreamingAnswerClient(),
+    )
+
+    events = [
+        event
+        async for event in stream_qa_events(
+            session=session,
+            question="逆变器绝缘阻抗低怎么排查？",
+            dependencies=dependencies,
+            min_rerank_score=0.2,
+            strong_rerank_score=0.6,
+            reference_top_k=5,
+        )
+    ]
+
+    heartbeat_events = [
+        event
+        for event in events
+        if "event: status" in event and '"heartbeat": true' in event
+    ]
+    answer_index = next(
+        index for index, event in enumerate(events) if "event: answer_delta" in event
+    )
+
+    assert heartbeat_events
+    assert "正在分析问题中的设备、故障和场景信息" in heartbeat_events[0]
+    assert events.index(heartbeat_events[0]) < answer_index

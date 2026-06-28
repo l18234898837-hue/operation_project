@@ -4,6 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.router import api_router
 from app.core.config import settings
 from app.core.logging import configure_app_logging
+from app.db.session import prewarm_database_connection
 
 
 def create_app() -> FastAPI:
@@ -23,6 +24,10 @@ def create_app() -> FastAPI:
     )
 
     app.include_router(api_router, prefix="/api")
+
+    @app.on_event("startup")
+    async def startup() -> None:
+        prewarm_database_connection()
 
     @app.get("/health", tags=["health"])
     async def health() -> dict[str, str]:

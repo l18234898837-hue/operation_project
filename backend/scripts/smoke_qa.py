@@ -15,7 +15,7 @@ async def main() -> None:
     cases = [
         ("rag", "逆变器绝缘阻抗低怎么排查？"),
         ("general_or_rag", "什么是无功功率？"),
-        ("refused", "今天上海天气怎么样？"),
+        ("realtime_boundary", "今天上海天气怎么样？"),
     ]
 
     for expected, question in cases:
@@ -29,8 +29,8 @@ async def main() -> None:
 
         if expected == "rag" and response.answer_type != "rag":
             raise SystemExit("RAG smoke case did not return rag")
-        if expected == "refused" and response.answer_type != "refused":
-            raise SystemExit("Realtime smoke case did not return refused")
+        if expected == "realtime_boundary" and response.answer_type != "general_llm":
+            raise SystemExit("Realtime smoke case did not return boundary answer")
         if expected == "general_or_rag" and response.answer_type not in {"general_llm", "rag"}:
             raise SystemExit("General smoke case returned unexpected answer_type")
 

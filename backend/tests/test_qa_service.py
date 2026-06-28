@@ -13,6 +13,7 @@ from app.models.rag import (
     QaTraceStep,
     QaUnanswered,
 )
+from app.services.conversation_rewrite import StandaloneQuestionResult
 from app.services.query_understanding import Intent, QueryUnderstandingResult
 from app.services.qa_service import QaDependencies, answer_question
 
@@ -26,6 +27,12 @@ class FakeSession:
 
     def add(self, item):
         self.added.append(item)
+
+    def get(self, model_type, item_id):
+        for item in self.added:
+            if isinstance(item, model_type) and getattr(item, "id", None) == item_id:
+                return item
+        return None
 
     def flush(self):
         self.flushes += 1
@@ -61,8 +68,8 @@ class FakeAnswerClient:
         )
         return "RAG answer"
 
-    async def generate_general(self, question):
-        self.general_calls.append(question)
+    async def generate_general(self, question, mode="general"):
+        self.general_calls.append({"question": question, "mode": mode})
         return "General answer"
 
 
@@ -74,6 +81,16 @@ class FakeRetriever:
     async def retrieve(self, query):
         self.calls.append(query)
         return self.evidence
+
+
+class FakeContextRewriter:
+    def __init__(self, result):
+        self.result = result
+        self.calls = []
+
+    async def rewrite(self, question, context):
+        self.calls.append({"question": question, "context": context})
+        return self.result
 
 
 def make_understanding(intent=Intent.knowledge_base_qa, **overrides):
@@ -113,6 +130,18 @@ def make_dependencies(understanding, evidence):
     )
 
 
+def make_existing_record(question="上一轮问题", answer="上一轮回答"):
+    record = QaRecord(
+        session_id=uuid.uuid4(),
+        question=question,
+        normalized_question=question,
+        answer=answer,
+        answer_type=AnswerType.rag,
+    )
+    record.id = uuid.uuid4()
+    return record
+
+
 def get_added(session, model_type):
     return [item for item in session.added if isinstance(item, model_type)]
 
@@ -124,7 +153,7 @@ async def test_answer_question_persists_rag_answer_reference_and_decision_metada
 
     response = await answer_question(
         session=session,
-        question="逆变器绝缘阻抗低怎么排查？",
+        question="项目知识库里有哪些运维内容？",
         dependencies=dependencies,
         min_rerank_score=0.2,
         strong_rerank_score=0.6,
@@ -190,7 +219,7 @@ async def test_answer_question_writes_structured_debug_logs_when_enabled(caplog)
     with caplog.at_level(logging.INFO, logger="app.services.qa_service"):
         response = await answer_question(
             session=session,
-            question="逆变器绝缘阻抗低怎么排查？",
+            question="项目知识库里有哪些运维内容？",
             dependencies=dependencies,
             min_rerank_score=0.2,
             strong_rerank_score=0.6,
@@ -248,9 +277,84 @@ async def test_answer_question_returns_general_llm_with_empty_references():
     assert response.decision["used_knowledge_base"] is False
     assert response.decision["refusal_reason"] is None
     assert dependencies.retriever.calls == []
-    assert dependencies.answer_client.general_calls == ["什么是无功功率？"]
+    assert dependencies.answer_client.general_calls == [
+        {"question": "什么是无功功率？", "mode": "general"}
+    ]
     assert records and records[0].answer_type == AnswerType.general_llm
     assert not get_added(session, QaUnanswered)
+
+
+@pytest.mark.asyncio
+async def test_answer_question_keeps_rewriter_disabled_metadata_with_history():
+    session = FakeSession()
+    existing_session = QaSession()
+    existing_session.id = uuid.uuid4()
+    existing_record = make_existing_record(
+        question="逆变器绝缘阻抗低怎么排查？",
+        answer="可以检查直流线缆绝缘。",
+    )
+    existing_record.session_id = existing_session.id
+    session.added.extend([existing_session, existing_record])
+    dependencies = make_dependencies(make_understanding(), make_evidence(score=0.8))
+
+    response = await answer_question(
+        session=session,
+        question="项目知识库里有哪些运维内容？",
+        session_id=existing_session.id,
+        dependencies=dependencies,
+        min_rerank_score=0.2,
+        strong_rerank_score=0.6,
+        reference_top_k=5,
+    )
+
+    assert response.answer_type == "rag"
+    assert response.decision["rewrite_reason"] == "rewriter_disabled"
+    assert response.decision["used_history"] is False
+    assert dependencies.understanding_client.calls == ["项目知识库里有哪些运维内容？"]
+
+
+@pytest.mark.asyncio
+async def test_answer_question_uses_rewriter_when_history_question_has_follow_up_signal():
+    session = FakeSession()
+    existing_session = QaSession()
+    existing_session.id = uuid.uuid4()
+    existing_record = make_existing_record(
+        question="逆变器绝缘阻抗低怎么排查？",
+        answer="可以检查直流线缆绝缘。",
+    )
+    existing_record.session_id = existing_session.id
+    session.added.extend([existing_session, existing_record])
+    rewriter = FakeContextRewriter(
+        StandaloneQuestionResult(
+            standalone_question="逆变器下雨天绝缘阻抗低怎么排查？",
+            is_follow_up=True,
+            used_history=True,
+            reason="test_follow_up_rewrite",
+        )
+    )
+    dependencies = make_dependencies(make_understanding(), make_evidence(score=0.8))
+    dependencies = QaDependencies(
+        understanding_client=dependencies.understanding_client,
+        retriever=dependencies.retriever,
+        answer_client=dependencies.answer_client,
+        context_rewriter=rewriter,
+    )
+
+    response = await answer_question(
+        session=session,
+        question="那下雨天才出现呢？",
+        session_id=existing_session.id,
+        dependencies=dependencies,
+        min_rerank_score=0.2,
+        strong_rerank_score=0.6,
+        reference_top_k=5,
+    )
+
+    assert response.answer_type == "rag"
+    assert response.decision["rewrite_reason"] == "test_follow_up_rewrite"
+    assert response.decision["used_history"] is True
+    assert rewriter.calls and rewriter.calls[0]["question"] == "那下雨天才出现呢？"
+    assert dependencies.understanding_client.calls == ["逆变器下雨天绝缘阻抗低怎么排查？"]
 
 
 @pytest.mark.asyncio
@@ -258,7 +362,6 @@ async def test_answer_question_returns_general_llm_with_empty_references():
     ("intent", "reason"),
     [
         (Intent.invalid_input, "invalid_input"),
-        (Intent.realtime_external, "realtime_external"),
         (Intent.out_of_scope, "out_of_scope"),
     ],
 )
@@ -279,7 +382,7 @@ async def test_answer_question_refuses_non_answerable_routes_and_records_unanswe
 
     response = await answer_question(
         session=session,
-        question="今天股价是多少？",
+        question="请帮我判断这个请求",
         dependencies=dependencies,
         min_rerank_score=0.2,
         strong_rerank_score=0.6,
@@ -297,6 +400,96 @@ async def test_answer_question_refuses_non_answerable_routes_and_records_unanswe
     assert records and records[0].answer_type == AnswerType.refused
     assert unanswered and unanswered[0].reason == reason
     assert session.commits == 1
+
+
+@pytest.mark.asyncio
+async def test_answer_question_pre_routes_chitchat_to_short_general_answer():
+    session = FakeSession()
+    dependencies = make_dependencies(make_understanding(), [])
+
+    response = await answer_question(
+        session=session,
+        question="你好",
+        dependencies=dependencies,
+        min_rerank_score=0.2,
+        strong_rerank_score=0.6,
+        reference_top_k=5,
+    )
+
+    records = get_added(session, QaRecord)
+    trace_steps = get_added(session, QaTraceStep)
+    assert response.answer_type == "general_llm"
+    assert response.intent == "chitchat"
+    assert response.decision["route"] == "chitchat"
+    assert response.decision["answer_mode"] == "chitchat"
+    assert response.decision["used_knowledge_base"] is False
+    assert response.decision["rewrite_reason"] == "pre_route_chitchat"
+    assert "load_history_ms" not in response.decision["timings_ms"]
+    assert "rewrite_question_ms" not in response.decision["timings_ms"]
+    assert "understand_intent_ms" not in response.decision["timings_ms"]
+    assert dependencies.understanding_client.calls == []
+    assert dependencies.retriever.calls == []
+    assert dependencies.answer_client.general_calls == [
+        {"question": "你好", "mode": "chitchat"}
+    ]
+    assert records and records[0].answer_type == AnswerType.general_llm
+    assert {step.step_name for step in trace_steps} >= {"pre_route", "answer_generation"}
+    assert not get_added(session, QaUnanswered)
+
+
+@pytest.mark.asyncio
+async def test_answer_question_pre_routes_domain_question_to_rag_without_intent_llm():
+    session = FakeSession()
+    dependencies = make_dependencies(make_understanding(), make_evidence(score=0.8))
+
+    response = await answer_question(
+        session=session,
+        question="低辐照下发电量下降原因",
+        dependencies=dependencies,
+        min_rerank_score=0.2,
+        strong_rerank_score=0.6,
+        reference_top_k=5,
+    )
+
+    assert response.answer_type == "rag"
+    assert response.intent == "knowledge_base_qa"
+    assert response.decision["route"] == "rag"
+    assert response.decision["intent_reason"] == "hard_rule_domain_fault_action"
+    assert response.decision["rewrite_reason"] == "pre_route_knowledge_base"
+    assert response.decision["search_query"] == "低辐照下发电量下降原因"
+    assert "load_history_ms" not in response.decision["timings_ms"]
+    assert "rewrite_question_ms" not in response.decision["timings_ms"]
+    assert "understand_intent_ms" not in response.decision["timings_ms"]
+    assert dependencies.understanding_client.calls == []
+    assert dependencies.retriever.calls == ["低辐照下发电量下降原因"]
+
+
+@pytest.mark.asyncio
+async def test_answer_question_pre_routes_realtime_external_to_boundary_answer():
+    session = FakeSession()
+    dependencies = make_dependencies(make_understanding(), [])
+
+    response = await answer_question(
+        session=session,
+        question="今天上海天气怎么样？",
+        dependencies=dependencies,
+        min_rerank_score=0.2,
+        strong_rerank_score=0.6,
+        reference_top_k=5,
+    )
+
+    assert response.answer_type == "general_llm"
+    assert response.intent == "realtime_external"
+    assert response.decision["route"] == "realtime_external"
+    assert response.decision["answer_mode"] == "realtime_external"
+    assert response.decision["used_knowledge_base"] is False
+    assert response.decision["refusal_reason"] is None
+    assert dependencies.understanding_client.calls == []
+    assert dependencies.retriever.calls == []
+    assert dependencies.answer_client.general_calls == [
+        {"question": "今天上海天气怎么样？", "mode": "realtime_external"}
+    ]
+    assert not get_added(session, QaUnanswered)
 
 
 @pytest.mark.asyncio

@@ -24,6 +24,12 @@ class Settings(BaseSettings):
     db_name: str = "operation_pv"
     db_user: str = "postgres"
     db_password: str = "postgres"
+    db_pool_size: int = 5
+    db_max_overflow: int = 10
+    db_pool_timeout_seconds: int = 30
+    db_pool_recycle_seconds: int = 1800
+    db_pool_pre_ping: bool = True
+    db_connection_prewarm_enabled: bool = True
 
     redis_host: str = "127.0.0.1"
     redis_port: int = 6379

@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 import re
+import time
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import bindparam, text
@@ -176,42 +177,81 @@ async def retrieve_evidence(
     rrf_top_k: int,
     final_top_k: int,
     rrf_k: int,
+    diagnostics: dict[str, object] | None = None,
 ) -> list[EvidenceChunk]:
+    total_start = time.perf_counter()
+    if diagnostics is not None:
+        diagnostics.clear()
+
+    step_start = time.perf_counter()
     normalized_query = normalize_query(query)
     keyword_query = build_keyword_text(normalized_query) or normalized_query
     keyword_tsquery = build_keyword_tsquery(keyword_query)
+    _record_diagnostic_timing(diagnostics, "query_prepare_ms", step_start)
+    _set_diagnostic(diagnostics, "normalized_query_length", len(normalized_query))
+    _set_diagnostic(diagnostics, "keyword_query_length", len(keyword_query))
+    _set_diagnostic(diagnostics, "keyword_tsquery_present", bool(keyword_tsquery))
+    _set_diagnostic(
+        diagnostics,
+        "keyword_tsquery_token_count",
+        len(keyword_tsquery.split(" | ")) if keyword_tsquery else 0,
+    )
+
+    step_start = time.perf_counter()
     query_embedding = (await embedding_client.embed([normalized_query]))[0]
+    _record_diagnostic_timing(diagnostics, "embedding_ms", step_start)
+    _set_diagnostic(diagnostics, "embedding_dimension", len(query_embedding))
+
     vector_stmt = text(build_vector_search_sql(vector_top_k)).bindparams(
         bindparam("query_embedding", type_=Vector(1024)),
         bindparam("limit"),
     )
 
+    step_start = time.perf_counter()
     vector_rows = session.execute(
         vector_stmt,
         {"query_embedding": query_embedding, "limit": vector_top_k},
     ).all()
+    _record_diagnostic_timing(diagnostics, "vector_search_ms", step_start)
+    _set_diagnostic(diagnostics, "vector_rows_count", len(vector_rows))
+
     keyword_rows = []
     if keyword_tsquery:
+        step_start = time.perf_counter()
         keyword_rows = session.execute(
             text(build_keyword_search_sql(keyword_top_k)),
             {"query_text": keyword_tsquery, "limit": keyword_top_k},
         ).all()
+        _record_diagnostic_timing(diagnostics, "keyword_search_ms", step_start)
+        _set_diagnostic(diagnostics, "keyword_search_skipped", False)
+    else:
+        _set_diagnostic(diagnostics, "keyword_search_ms", 0)
+        _set_diagnostic(diagnostics, "keyword_search_skipped", True)
+    _set_diagnostic(diagnostics, "keyword_rows_count", len(keyword_rows))
 
+    step_start = time.perf_counter()
     fused = reciprocal_rank_fusion(
         _rows_to_ranked(vector_rows, "vector"),
         _rows_to_ranked(keyword_rows, "keyword"),
         k=rrf_k,
         limit=rrf_top_k,
     )
+    _record_diagnostic_timing(diagnostics, "rrf_ms", step_start)
+    _set_diagnostic(diagnostics, "fused_count", len(fused))
     if not fused:
+        _set_empty_retrieval_diagnostics(diagnostics, total_start)
         return []
 
     segment_ids = [candidate.segment_id for candidate in fused]
+    step_start = time.perf_counter()
     segments = (
         session.query(KbDocumentSegment)
         .filter(KbDocumentSegment.id.in_(segment_ids))
         .all()
     )
+    _record_diagnostic_timing(diagnostics, "load_segments_ms", step_start)
+    _set_diagnostic(diagnostics, "loaded_segments_count", len(segments))
+
     segment_by_id = {str(segment.id): segment for segment in segments}
     fused_by_id = {candidate.segment_id: candidate for candidate in fused}
     ordered_segments = [
@@ -219,17 +259,29 @@ async def retrieve_evidence(
         for segment_id in segment_ids
         if segment_id in segment_by_id
     ]
+    _set_diagnostic(diagnostics, "ordered_segments_count", len(ordered_segments))
     if not ordered_segments:
+        _set_empty_retrieval_diagnostics(diagnostics, total_start)
         return []
 
     final_segment_ids = [str(segment.id) for segment in ordered_segments[:final_top_k]]
     rerank_scores: dict[str, float] = {}
+    _set_diagnostic(diagnostics, "rerank_enabled", rerank_client is not None)
+    _set_diagnostic(diagnostics, "rerank_documents_count", len(ordered_segments))
+    _set_diagnostic(
+        diagnostics,
+        "rerank_input_chars",
+        sum(len(segment.indexed_text or "") for segment in ordered_segments),
+    )
     if rerank_client is not None:
+        step_start = time.perf_counter()
         rerank_results = await rerank_client.rerank(
             normalized_query,
             [segment.indexed_text for segment in ordered_segments],
             top_n=final_top_k,
         )
+        _record_diagnostic_timing(diagnostics, "rerank_ms", step_start)
+        _set_diagnostic(diagnostics, "rerank_results_count", len(rerank_results))
         final_segment_ids = []
         for result in rerank_results:
             if result.index < 0 or result.index >= len(ordered_segments):
@@ -237,8 +289,12 @@ async def retrieve_evidence(
             segment_id = str(ordered_segments[result.index].id)
             final_segment_ids.append(segment_id)
             rerank_scores[segment_id] = float(result.score)
+    else:
+        _set_diagnostic(diagnostics, "rerank_ms", 0)
+        _set_diagnostic(diagnostics, "rerank_results_count", 0)
 
-    return [
+    step_start = time.perf_counter()
+    evidence = [
         _to_evidence_chunk(
             segment=segment_by_id[segment_id],
             fused=fused_by_id[segment_id],
@@ -247,6 +303,10 @@ async def retrieve_evidence(
         for segment_id in final_segment_ids[:final_top_k]
         if segment_id in segment_by_id and segment_id in fused_by_id
     ]
+    _record_diagnostic_timing(diagnostics, "build_evidence_ms", step_start)
+    _set_diagnostic(diagnostics, "result_count", len(evidence))
+    _record_diagnostic_timing(diagnostics, "total_internal_ms", total_start)
+    return evidence
 
 
 def _rows_to_ranked(rows: list[object], source: str) -> list[RankedCandidate]:
@@ -259,6 +319,37 @@ def _rows_to_ranked(rows: list[object], source: str) -> list[RankedCandidate]:
         )
         for row in rows
     ]
+
+
+def _set_diagnostic(
+    diagnostics: dict[str, object] | None,
+    key: str,
+    value: object,
+) -> None:
+    if diagnostics is not None:
+        diagnostics[key] = value
+
+
+def _record_diagnostic_timing(
+    diagnostics: dict[str, object] | None,
+    key: str,
+    start: float,
+) -> None:
+    _set_diagnostic(diagnostics, key, int((time.perf_counter() - start) * 1000))
+
+
+def _set_empty_retrieval_diagnostics(
+    diagnostics: dict[str, object] | None,
+    total_start: float,
+) -> None:
+    _set_diagnostic(diagnostics, "result_count", 0)
+    _set_diagnostic(diagnostics, "rerank_enabled", False)
+    _set_diagnostic(diagnostics, "rerank_documents_count", 0)
+    _set_diagnostic(diagnostics, "rerank_input_chars", 0)
+    _set_diagnostic(diagnostics, "rerank_ms", 0)
+    _set_diagnostic(diagnostics, "rerank_results_count", 0)
+    _set_diagnostic(diagnostics, "build_evidence_ms", 0)
+    _record_diagnostic_timing(diagnostics, "total_internal_ms", total_start)
 
 
 def build_keyword_tsquery(keyword_query: str) -> str:

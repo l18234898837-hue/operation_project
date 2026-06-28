@@ -31,7 +31,39 @@ def test_realtime_external_question_is_detected_before_llm():
     assert result is not None
     assert result.intent == Intent.realtime_external
     assert result.should_use_knowledge_base is False
-    assert result.refusal_reason == "realtime_external"
+    assert result.refusal_reason is None
+
+
+def test_chitchat_question_is_detected_before_llm():
+    result = apply_intent_hard_rules("你好")
+
+    assert result is not None
+    assert result.intent == Intent.chitchat
+    assert result.should_use_knowledge_base is False
+    assert result.refusal_reason is None
+
+
+def test_chitchat_with_domain_question_routes_to_knowledge_base():
+    result = apply_intent_hard_rules("你好，逆变器报警怎么处理？")
+
+    assert result is not None
+    assert result.intent == Intent.knowledge_base_qa
+    assert result.should_use_knowledge_base is True
+
+
+def test_strong_domain_question_routes_to_knowledge_base_without_action_term():
+    result = apply_intent_hard_rules("低辐照下发电量下降原因")
+
+    assert result is not None
+    assert result.intent == Intent.knowledge_base_qa
+    assert result.should_use_knowledge_base is True
+    assert result.search_query == "低辐照下发电量下降原因"
+
+
+def test_follow_up_domain_question_does_not_skip_rewrite_and_intent_llm():
+    result = apply_intent_hard_rules("这个逆变器故障怎么处理？")
+
+    assert result is None
 
 
 def test_domain_fault_question_forces_knowledge_base():
@@ -108,11 +140,7 @@ async def test_understand_query_uses_llm_for_general_explanation():
             return """
             {
               "intent": "general_explanation",
-              "confidence": 0.82,
-              "should_use_knowledge_base": false,
-              "normalized_question": "什么是无功功率？",
-              "search_query": "",
-              "reason": "通用概念解释"
+              "confidence": 0.82
             }
             """
 
@@ -125,36 +153,37 @@ async def test_understand_query_uses_llm_for_general_explanation():
 
     assert result.intent == Intent.general_explanation
     assert result.should_use_knowledge_base is False
-    assert result.normalized_question == "什么是无功功率？"
-    assert "你只做意图识别" in chat_client.captured_messages[0]["content"]
+    assert result.normalized_question == "啥是无功功率？"
+    assert result.search_query == ""
+    assert result.reason == "llm_intent_classification"
+    assert "意图分类器" in chat_client.captured_messages[0]["content"]
+    assert "search_query" not in chat_client.captured_messages[1]["content"]
 
 
 @pytest.mark.asyncio
-async def test_understand_query_parses_fenced_json_and_rewrites_search_query():
+async def test_understand_query_parses_fenced_json_and_uses_question_as_search_query():
     class FakeChatClient:
         async def chat(self, messages, temperature=0.1):
             return """
             ```json
             {
               "intent": "knowledge_base_qa",
-              "confidence": 0.88,
-              "should_use_knowledge_base": true,
-              "normalized_question": "组件 PID 衰减如何排查？",
-              "search_query": "组件 PID 衰减 排查 处理",
-              "reason": "设备故障处理"
+              "confidence": 0.88
             }
             ```
             """
 
     result = await understand_query(
-        question="光伏运维资料中有没有 PID 相关内容？",
+        question="资料里有没有相关内容？",
         chat_client=FakeChatClient(),
         max_question_chars=500,
     )
 
     assert result.intent == Intent.knowledge_base_qa
     assert result.should_use_knowledge_base is True
-    assert result.search_query == "组件 PID 衰减 排查 处理"
+    assert result.normalized_question == "资料里有没有相关内容？"
+    assert result.search_query == "资料里有没有相关内容？"
+    assert result.reason == "llm_intent_classification"
 
 
 @pytest.mark.asyncio

@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import logging
 import time
-from typing import Protocol
+from typing import Awaitable, Callable, Protocol
 import uuid
 
 from sqlalchemy import select
@@ -24,8 +24,10 @@ from app.services.conversation_context import (
 )
 from app.services.conversation_rewrite import StandaloneQuestionResult
 from app.services.evidence_filtering import (
+    compress_evidence_for_generation,
     filter_evidence_for_answer,
     filter_references_for_response,
+    select_evidence_compression_policy,
 )
 from app.services.qa_debug_logging import log_qa_debug_event
 from app.services.qa_error_handling import classify_qa_exception
@@ -33,9 +35,15 @@ from app.services.qa_trace import (
     QaTraceCollector,
     persist_trace_steps,
 )
-from app.services.query_understanding import Intent, QueryUnderstandingResult
+from app.services.query_understanding import (
+    Intent,
+    QueryUnderstandingResult,
+    apply_intent_hard_rules,
+)
 
 logger = logging.getLogger(__name__)
+
+ProgressCallback = Callable[[str, str, dict[str, object] | None], Awaitable[None]]
 
 
 class UnderstandingClient(Protocol):
@@ -57,7 +65,7 @@ class AnswerClient(Protocol):
     ) -> str:
         ...
 
-    async def generate_general(self, question: str) -> str:
+    async def generate_general(self, question: str, mode: str = "general") -> str:
         ...
 
 
@@ -86,6 +94,7 @@ class QaDependencies:
     answer_client: AnswerClient
     context_rewriter: ContextRewriter | None = None
     session_summarizer: SessionSummarizer | None = None
+    progress_callback: ProgressCallback | None = None
 
 
 @dataclass(frozen=True)
@@ -93,6 +102,12 @@ class QaDebugContext:
     enabled: bool = False
     preview_chars: int = 80
     evidence_preview_enabled: bool = False
+
+
+@dataclass(frozen=True)
+class QaSessionInitResult:
+    qa_session: QaSession
+    diagnostics: dict[str, object]
 
 
 async def answer_question(
@@ -134,14 +149,17 @@ async def answer_question(
             question_length=len(question),
         )
         step_start = time.perf_counter()
-        qa_session = _get_or_create_session(session, session_id)
+        session_init = _get_or_create_session(session, session_id)
+        qa_session = session_init.qa_session
         _record_timing(timings, trace, "get_or_create_session", step_start)
+        _merge_timing_diagnostics(timings, "get_or_create_session", session_init.diagnostics)
         _log_debug(
             debug_context,
             "qa.session.ready",
             trace_id=trace_id,
             session_id=qa_session.id,
             duration_ms=timings.get("get_or_create_session_ms"),
+            diagnostics=session_init.diagnostics,
         )
         return await _answer_question_inner(
             session=session,
@@ -178,8 +196,10 @@ async def answer_question(
         _record_timing(timings, trace, "rollback", step_start)
         fallback_session_id = session_id or getattr(qa_session, "id", None)
         step_start = time.perf_counter()
-        qa_session = _get_or_create_session(session, fallback_session_id)
+        session_init = _get_or_create_session(session, fallback_session_id)
+        qa_session = session_init.qa_session
         _record_timing(timings, trace, "fallback_session", step_start)
+        _merge_timing_diagnostics(timings, "fallback_session", session_init.diagnostics)
         decision = classify_qa_exception(exc)
         understanding = QueryUnderstandingResult(
             intent=Intent.out_of_scope,
@@ -277,7 +297,124 @@ async def _answer_question_inner(
     timings: dict[str, int],
     debug_context: QaDebugContext,
 ) -> QaAskResponse:
+    await _emit_progress(
+        dependencies,
+        "understanding",
+        "正在理解你的问题...",
+    )
+    hard_rule_understanding = apply_intent_hard_rules(question)
+    if hard_rule_understanding is not None:
+        _log_debug(
+            debug_context,
+            "qa.intent.hard_rule",
+            trace_id=trace_id,
+            session_id=qa_session.id,
+            intent=hard_rule_understanding.intent.value,
+            should_use_knowledge_base=hard_rule_understanding.should_use_knowledge_base,
+            normalized_question=hard_rule_understanding.normalized_question,
+            search_query=hard_rule_understanding.search_query,
+            reason=hard_rule_understanding.reason,
+            skip_rewrite=True,
+            skip_llm_intent=True,
+        )
+        trace.record_step(
+            step_name="pre_route",
+            duration_ms=0,
+            metadata={
+                "intent": hard_rule_understanding.intent.value,
+                "reason": hard_rule_understanding.reason,
+                "skip_rewrite": True,
+                "skip_llm_intent": True,
+            },
+        )
+        if hard_rule_understanding.intent == Intent.chitchat:
+            await _emit_progress(
+                dependencies,
+                "quick_reply",
+                "收到，马上回复...",
+            )
+            return await _answer_general_route(
+                session=session,
+                dependencies=dependencies,
+                qa_session=qa_session,
+                previous_records=[],
+                question=question,
+                understanding=hard_rule_understanding,
+                rewrite_metadata=_skipped_rewrite_metadata(question, "pre_route_chitchat"),
+                mode="chitchat",
+                route="chitchat",
+                trace_id=trace_id,
+                trace=trace,
+                start=start,
+                timings=timings,
+                debug_context=debug_context,
+            )
+        if hard_rule_understanding.intent == Intent.invalid_input:
+            return await _answer_refused_route(
+                session=session,
+                dependencies=dependencies,
+                qa_session=qa_session,
+                previous_records=[],
+                question=question,
+                understanding=hard_rule_understanding,
+                rewrite_metadata=_skipped_rewrite_metadata(question, "pre_route_invalid_input"),
+                reason=hard_rule_understanding.refusal_reason or hard_rule_understanding.intent.value,
+                trace_id=trace_id,
+                trace=trace,
+                start=start,
+                timings=timings,
+                debug_context=debug_context,
+            )
+        if hard_rule_understanding.intent == Intent.realtime_external:
+            await _emit_progress(
+                dependencies,
+                "generating",
+                "当前未接入实时数据源，正在整理通用建议...",
+            )
+            return await _answer_general_route(
+                session=session,
+                dependencies=dependencies,
+                qa_session=qa_session,
+                previous_records=[],
+                question=question,
+                understanding=hard_rule_understanding,
+                rewrite_metadata=_skipped_rewrite_metadata(question, "pre_route_realtime_external"),
+                mode="realtime_external",
+                route="realtime_external",
+                trace_id=trace_id,
+                trace=trace,
+                start=start,
+                timings=timings,
+                debug_context=debug_context,
+            )
+        if hard_rule_understanding.intent == Intent.knowledge_base_qa:
+            return await _answer_rag_route(
+                session=session,
+                dependencies=dependencies,
+                qa_session=qa_session,
+                previous_records=[],
+                question=question,
+                understanding=hard_rule_understanding,
+                rewrite_metadata=_skipped_rewrite_metadata(question, "pre_route_knowledge_base"),
+                min_rerank_score=min_rerank_score,
+                strong_rerank_score=strong_rerank_score,
+                qa_evidence_min_score=qa_evidence_min_score,
+                qa_reference_min_score=qa_reference_min_score,
+                qa_reference_visible_top_k=qa_reference_visible_top_k,
+                qa_reference_max_top_k=qa_reference_max_top_k,
+                trace_id=trace_id,
+                trace=trace,
+                start=start,
+                timings=timings,
+                debug_context=debug_context,
+            )
+
     step_start = time.perf_counter()
+    await _emit_progress(
+        dependencies,
+        "context",
+        "正在整理会话上下文...",
+    )
     previous_records = _list_session_records(session, qa_session.id)
     _record_timing(timings, trace, "load_history", step_start)
     _log_debug(
@@ -310,6 +447,12 @@ async def _answer_question_inner(
     )
 
     step_start = time.perf_counter()
+    if context.used_history:
+        await _emit_progress(
+            dependencies,
+            "rewriting",
+            "正在结合本轮会话上下文...",
+        )
     rewrite_result = await _rewrite_question(question, context, dependencies)
     _record_timing(timings, trace, "rewrite_question", step_start)
     question_for_understanding = rewrite_result.standalone_question
@@ -326,6 +469,11 @@ async def _answer_question_inner(
     )
 
     step_start = time.perf_counter()
+    await _emit_progress(
+        dependencies,
+        "understanding",
+        "正在判断是否需要查询知识库...",
+    )
     understanding = await dependencies.understanding_client.understand(
         question_for_understanding
     )
@@ -345,48 +493,72 @@ async def _answer_question_inner(
         duration_ms=timings.get("understand_intent_ms"),
     )
 
-    if understanding.intent in _REFUSED_INTENTS:
-        reason = understanding.refusal_reason or understanding.intent.value
-        answer = _refusal_message(understanding)
-        record = _add_record(
-            session=session,
-            qa_session=qa_session,
-            trace_id=trace_id,
-            question=question,
-            understanding=understanding,
-            answer=answer,
-            answer_type=AnswerType.refused,
-            confidence=understanding.confidence,
-            latency_ms=_latency_ms(start),
-            decision_extra={
-                **rewrite_metadata,
-                "route": "refused",
-                "used_knowledge_base": False,
-                "refusal_reason": reason,
-                "timings_ms": _timings_snapshot(start, timings),
-            },
+    if (
+        understanding.intent == Intent.chitchat
+        and not understanding.should_use_knowledge_base
+    ):
+        await _emit_progress(
+            dependencies,
+            "quick_reply",
+            "收到，马上回复...",
         )
-        _add_unanswered(
-            session=session,
-            qa_session=qa_session,
-            record=record,
-            question=question,
-            understanding=understanding,
-            reason=reason,
-        )
-        return await _finalize_response(
+        return await _answer_general_route(
             session=session,
             dependencies=dependencies,
             qa_session=qa_session,
-            records=[*previous_records, record],
-            record=record,
-            intent=understanding.intent.value,
-            references=[],
+            previous_records=previous_records,
+            question=question,
+            understanding=understanding,
+            rewrite_metadata=rewrite_metadata,
+            mode="chitchat",
+            route="chitchat",
             trace_id=trace_id,
             trace=trace,
             start=start,
             timings=timings,
-            route="refused",
+            debug_context=debug_context,
+        )
+
+    if (
+        understanding.intent == Intent.realtime_external
+        and not understanding.should_use_knowledge_base
+    ):
+        await _emit_progress(
+            dependencies,
+            "generating",
+            "当前未接入实时数据源，正在整理通用建议...",
+        )
+        return await _answer_general_route(
+            session=session,
+            dependencies=dependencies,
+            qa_session=qa_session,
+            previous_records=previous_records,
+            question=question,
+            understanding=understanding,
+            rewrite_metadata=rewrite_metadata,
+            mode="realtime_external",
+            route="realtime_external",
+            trace_id=trace_id,
+            trace=trace,
+            start=start,
+            timings=timings,
+            debug_context=debug_context,
+        )
+
+    if understanding.intent in _REFUSED_INTENTS:
+        return await _answer_refused_route(
+            session=session,
+            dependencies=dependencies,
+            qa_session=qa_session,
+            previous_records=previous_records,
+            question=question,
+            understanding=understanding,
+            rewrite_metadata=rewrite_metadata,
+            reason=understanding.refusal_reason or understanding.intent.value,
+            trace_id=trace_id,
+            trace=trace,
+            start=start,
+            timings=timings,
             debug_context=debug_context,
         )
 
@@ -394,49 +566,204 @@ async def _answer_question_inner(
         understanding.intent == Intent.general_explanation
         and not understanding.should_use_knowledge_base
     ):
-        step_start = time.perf_counter()
-        answer = await dependencies.answer_client.generate_general(
-            understanding.normalized_question
-        )
-        _record_timing(timings, trace, "answer_generation", step_start)
-        record = _add_record(
-            session=session,
-            qa_session=qa_session,
-            trace_id=trace_id,
-            question=question,
-            understanding=understanding,
-            answer=answer,
-            answer_type=AnswerType.general_llm,
-            confidence=understanding.confidence,
-            latency_ms=_latency_ms(start),
-            decision_extra={
-                **rewrite_metadata,
-                "route": "general_llm",
-                "used_knowledge_base": False,
-                "refusal_reason": None,
-                "timings_ms": _timings_snapshot(start, timings),
-            },
-        )
-        return await _finalize_response(
+        return await _answer_general_route(
             session=session,
             dependencies=dependencies,
             qa_session=qa_session,
-            records=[*previous_records, record],
-            record=record,
-            intent=understanding.intent.value,
-            references=[],
+            previous_records=previous_records,
+            question=question,
+            understanding=understanding,
+            rewrite_metadata=rewrite_metadata,
+            mode="general",
+            route="general_llm",
             trace_id=trace_id,
             trace=trace,
             start=start,
             timings=timings,
-            route="general_llm",
             debug_context=debug_context,
         )
 
+    return await _answer_rag_route(
+        session=session,
+        dependencies=dependencies,
+        qa_session=qa_session,
+        previous_records=previous_records,
+        question=question,
+        understanding=understanding,
+        rewrite_metadata=rewrite_metadata,
+        min_rerank_score=min_rerank_score,
+        strong_rerank_score=strong_rerank_score,
+        qa_evidence_min_score=qa_evidence_min_score,
+        qa_reference_min_score=qa_reference_min_score,
+        qa_reference_visible_top_k=qa_reference_visible_top_k,
+        qa_reference_max_top_k=qa_reference_max_top_k,
+        trace_id=trace_id,
+        trace=trace,
+        start=start,
+        timings=timings,
+        debug_context=debug_context,
+    )
+
+
+async def _answer_general_route(
+    session: Session,
+    dependencies: QaDependencies,
+    qa_session: QaSession,
+    previous_records: list[QaRecord],
+    question: str,
+    understanding: QueryUnderstandingResult,
+    rewrite_metadata: dict[str, object],
+    mode: str,
+    route: str,
+    trace_id: str,
+    trace: QaTraceCollector,
+    start: float,
+    timings: dict[str, int],
+    debug_context: QaDebugContext,
+) -> QaAskResponse:
+    step_start = time.perf_counter()
+    answer = await dependencies.answer_client.generate_general(
+        understanding.normalized_question,
+        mode=mode,
+    )
+    _record_timing(timings, trace, "answer_generation", step_start)
+    answer_diagnostics = _answer_diagnostics(dependencies.answer_client)
+    _merge_timing_diagnostics(timings, "answer_generation", answer_diagnostics)
+    _log_debug(
+        debug_context,
+        "qa.answer.generated",
+        trace_id=trace_id,
+        session_id=qa_session.id,
+        route=route,
+        diagnostics=answer_diagnostics,
+        duration_ms=timings.get("answer_generation_ms"),
+    )
+    record = _add_record(
+        session=session,
+        qa_session=qa_session,
+        trace_id=trace_id,
+        question=question,
+        understanding=understanding,
+        answer=answer,
+        answer_type=AnswerType.general_llm,
+        confidence=understanding.confidence,
+        latency_ms=_latency_ms(start),
+        decision_extra={
+            **rewrite_metadata,
+            "route": route,
+            "used_knowledge_base": False,
+            "refusal_reason": None,
+            "answer_mode": mode,
+            "timings_ms": _timings_snapshot(start, timings),
+        },
+    )
+    return await _finalize_response(
+        session=session,
+        dependencies=dependencies,
+        qa_session=qa_session,
+        records=[*previous_records, record],
+        record=record,
+        intent=understanding.intent.value,
+        references=[],
+        trace_id=trace_id,
+        trace=trace,
+        start=start,
+        timings=timings,
+        route=route,
+        debug_context=debug_context,
+    )
+
+
+async def _answer_refused_route(
+    session: Session,
+    dependencies: QaDependencies,
+    qa_session: QaSession,
+    previous_records: list[QaRecord],
+    question: str,
+    understanding: QueryUnderstandingResult,
+    rewrite_metadata: dict[str, object],
+    reason: str,
+    trace_id: str,
+    trace: QaTraceCollector,
+    start: float,
+    timings: dict[str, int],
+    debug_context: QaDebugContext,
+) -> QaAskResponse:
+    answer = _refusal_message(understanding)
+    record = _add_record(
+        session=session,
+        qa_session=qa_session,
+        trace_id=trace_id,
+        question=question,
+        understanding=understanding,
+        answer=answer,
+        answer_type=AnswerType.refused,
+        confidence=understanding.confidence,
+        latency_ms=_latency_ms(start),
+        decision_extra={
+            **rewrite_metadata,
+            "route": "refused",
+            "used_knowledge_base": False,
+            "refusal_reason": reason,
+            "timings_ms": _timings_snapshot(start, timings),
+        },
+    )
+    _add_unanswered(
+        session=session,
+        qa_session=qa_session,
+        record=record,
+        question=question,
+        understanding=understanding,
+        reason=reason,
+    )
+    return await _finalize_response(
+        session=session,
+        dependencies=dependencies,
+        qa_session=qa_session,
+        records=[*previous_records, record],
+        record=record,
+        intent=understanding.intent.value,
+        references=[],
+        trace_id=trace_id,
+        trace=trace,
+        start=start,
+        timings=timings,
+        route="refused",
+        debug_context=debug_context,
+    )
+
+
+async def _answer_rag_route(
+    session: Session,
+    dependencies: QaDependencies,
+    qa_session: QaSession,
+    previous_records: list[QaRecord],
+    question: str,
+    understanding: QueryUnderstandingResult,
+    rewrite_metadata: dict[str, object],
+    min_rerank_score: float,
+    strong_rerank_score: float,
+    qa_evidence_min_score: float,
+    qa_reference_min_score: float,
+    qa_reference_visible_top_k: int,
+    qa_reference_max_top_k: int,
+    trace_id: str,
+    trace: QaTraceCollector,
+    start: float,
+    timings: dict[str, int],
+    debug_context: QaDebugContext,
+) -> QaAskResponse:
     search_query = understanding.search_query or understanding.normalized_question
     step_start = time.perf_counter()
+    await _emit_progress(
+        dependencies,
+        "retrieving",
+        "正在查找光伏运维知识库...",
+    )
     evidence = await dependencies.retriever.retrieve(search_query)
     _record_timing(timings, trace, "retrieve_evidence", step_start)
+    retrieval_diagnostics = _retrieval_diagnostics(dependencies.retriever)
+    _merge_timing_diagnostics(timings, "retrieve_evidence", retrieval_diagnostics)
     top_score = _top_rerank_score(evidence)
     _log_debug(
         debug_context,
@@ -447,10 +774,20 @@ async def _answer_question_inner(
         evidence=evidence,
         evidence_count=len(evidence),
         top1_rerank_score=top_score,
+        diagnostics=retrieval_diagnostics,
         duration_ms=timings.get("retrieve_evidence_ms"),
     )
 
     if top_score is None or top_score < min_rerank_score:
+        await _emit_progress(
+            dependencies,
+            "low_confidence",
+            "知识库匹配度较低，正在判断是否可以可靠回答...",
+            {
+                "top1_rerank_score": top_score,
+                "threshold": min_rerank_score,
+            },
+        )
         answer = "当前知识库没有找到足够相关的依据，暂时无法可靠回答该问题。"
         record = _add_record(
             session=session,
@@ -497,10 +834,15 @@ async def _answer_question_inner(
         )
 
     step_start = time.perf_counter()
+    compression_policy = select_evidence_compression_policy(evidence)
     evidence_for_answer = filter_evidence_for_answer(
         evidence=evidence,
         min_rerank_score=qa_evidence_min_score,
-        max_items=qa_reference_visible_top_k,
+        max_items=compression_policy.max_items,
+    )
+    evidence_for_generation = compress_evidence_for_generation(
+        evidence_for_answer,
+        max_chars_per_item=compression_policy.max_chars_per_item,
     )
     evidence_for_response = filter_references_for_response(
         evidence=evidence,
@@ -508,18 +850,41 @@ async def _answer_question_inner(
         max_items=qa_reference_max_top_k,
     )
     _record_timing(timings, trace, "filter_evidence", step_start)
+    await _emit_progress(
+        dependencies,
+        "evidence_ready",
+        _evidence_ready_message(
+            evidence_count=len(evidence_for_generation),
+            compression_reason=compression_policy.reason,
+        ),
+        {
+            "evidence_count": len(evidence_for_generation),
+            "reference_count": len(evidence_for_response),
+            "generation_evidence_chars": _evidence_chars(evidence_for_generation),
+            "evidence_compression_reason": compression_policy.reason,
+        },
+    )
     _log_debug(
         debug_context,
         "qa.evidence.filtered",
         trace_id=trace_id,
         session_id=qa_session.id,
         evidence_for_answer_count=len(evidence_for_answer),
+        generation_evidence_count=len(evidence_for_generation),
+        generation_evidence_chars=_evidence_chars(evidence_for_generation),
+        evidence_compression_reason=compression_policy.reason,
+        evidence_max_chars_per_item=compression_policy.max_chars_per_item,
         reference_count=len(evidence_for_response),
         evidence_min_score=qa_evidence_min_score,
         reference_min_score=qa_reference_min_score,
         duration_ms=timings.get("filter_evidence_ms"),
     )
     if not evidence_for_answer:
+        await _emit_progress(
+            dependencies,
+            "low_confidence",
+            "知识库匹配度较低，正在判断是否可以可靠回答...",
+        )
         answer = "当前知识库检索结果未达到进入答案生成的证据阈值，暂时无法可靠回答该问题。"
         record = _add_record(
             session=session,
@@ -567,12 +932,28 @@ async def _answer_question_inner(
 
     cautious = top_score < strong_rerank_score
     step_start = time.perf_counter()
+    await _emit_progress(
+        dependencies,
+        "generating",
+        "正在根据资料生成回答...",
+    )
     answer = await dependencies.answer_client.generate_rag(
         question=understanding.normalized_question,
-        evidence=evidence_for_answer,
+        evidence=evidence_for_generation,
         cautious=cautious,
     )
     _record_timing(timings, trace, "answer_generation", step_start)
+    answer_diagnostics = _answer_diagnostics(dependencies.answer_client)
+    _merge_timing_diagnostics(timings, "answer_generation", answer_diagnostics)
+    _log_debug(
+        debug_context,
+        "qa.answer.generated",
+        trace_id=trace_id,
+        session_id=qa_session.id,
+        route="rag",
+        diagnostics=answer_diagnostics,
+        duration_ms=timings.get("answer_generation_ms"),
+    )
 
     step_start = time.perf_counter()
     record = _add_record(
@@ -598,6 +979,10 @@ async def _answer_question_inner(
             "reference_max_top_k": qa_reference_max_top_k,
             "cautious": cautious,
             "evidence_for_answer_count": len(evidence_for_answer),
+            "generation_evidence_count": len(evidence_for_generation),
+            "generation_evidence_chars": _evidence_chars(evidence_for_generation),
+            "evidence_compression_reason": compression_policy.reason,
+            "evidence_max_chars_per_item": compression_policy.max_chars_per_item,
             "reference_count": len(evidence_for_response),
             "timings_ms": _timings_snapshot(start, timings),
         },
@@ -629,20 +1014,51 @@ async def _answer_question_inner(
 def _get_or_create_session(
     session: Session,
     session_id: str | uuid.UUID | None,
-) -> QaSession:
+) -> QaSessionInitResult:
+    diagnostics: dict[str, object] = {
+        "has_input_session_id": bool(session_id),
+        "connection_checkout_ms": 0,
+        "connection_checkout_skipped": not hasattr(session, "connection"),
+        "parse_session_id_ms": 0,
+        "session_get_ms": 0,
+        "session_get_skipped": not bool(session_id) or not hasattr(session, "get"),
+        "session_found": False,
+        "session_add_ms": 0,
+        "session_flush_ms": 0,
+        "created": False,
+    }
+
+    if hasattr(session, "connection"):
+        step_start = time.perf_counter()
+        session.connection()
+        diagnostics["connection_checkout_ms"] = _elapsed_ms(step_start)
+
     if session_id:
+        step_start = time.perf_counter()
         session_uuid = (
             session_id if isinstance(session_id, uuid.UUID) else uuid.UUID(str(session_id))
         )
-        existing = session.get(QaSession, session_uuid) if hasattr(session, "get") else None
+        diagnostics["parse_session_id_ms"] = _elapsed_ms(step_start)
+        if hasattr(session, "get"):
+            step_start = time.perf_counter()
+            existing = session.get(QaSession, session_uuid)
+            diagnostics["session_get_ms"] = _elapsed_ms(step_start)
+        else:
+            existing = None
         if existing is not None:
-            return existing
+            diagnostics["session_found"] = True
+            return QaSessionInitResult(existing, diagnostics)
         qa_session = QaSession(id=session_uuid)
     else:
         qa_session = QaSession()
+    step_start = time.perf_counter()
     session.add(qa_session)
+    diagnostics["session_add_ms"] = _elapsed_ms(step_start)
+    step_start = time.perf_counter()
     session.flush()
-    return qa_session
+    diagnostics["session_flush_ms"] = _elapsed_ms(step_start)
+    diagnostics["created"] = True
+    return QaSessionInitResult(qa_session, diagnostics)
 
 
 def _list_session_records(session: Session, session_id: uuid.UUID) -> list[QaRecord]:
@@ -687,6 +1103,16 @@ def _rewrite_metadata(
         "is_follow_up": rewrite_result.is_follow_up,
         "used_history": rewrite_result.used_history,
         "rewrite_reason": rewrite_result.reason,
+    }
+
+
+def _skipped_rewrite_metadata(question: str, reason: str) -> dict[str, object]:
+    return {
+        "original_question": question,
+        "standalone_question": question,
+        "is_follow_up": False,
+        "used_history": False,
+        "rewrite_reason": reason,
     }
 
 
@@ -964,6 +1390,51 @@ def _record_timing(
     return duration_ms
 
 
+def _merge_timing_diagnostics(
+    timings: dict[str, int],
+    prefix: str,
+    diagnostics: dict[str, object],
+) -> None:
+    for key, value in diagnostics.items():
+        if key.endswith("_ms") and isinstance(value, int) and not isinstance(value, bool):
+            timings[f"{prefix}_{key}"] = value
+
+
+def _retrieval_diagnostics(retriever: Retriever) -> dict[str, object]:
+    diagnostics = getattr(retriever, "last_diagnostics", None)
+    return dict(diagnostics) if isinstance(diagnostics, dict) else {}
+
+
+def _answer_diagnostics(answer_client: AnswerClient) -> dict[str, object]:
+    diagnostics = getattr(answer_client, "last_diagnostics", None)
+    return dict(diagnostics) if isinstance(diagnostics, dict) else {}
+
+
+async def _emit_progress(
+    dependencies: QaDependencies,
+    stage: str,
+    message: str,
+    extra: dict[str, object] | None = None,
+) -> None:
+    if dependencies.progress_callback is None:
+        return
+    await dependencies.progress_callback(stage, message, extra)
+
+
+def _evidence_ready_message(evidence_count: int, compression_reason: str) -> str:
+    if evidence_count <= 0:
+        return "知识库匹配度较低，正在判断是否可以可靠回答..."
+    if compression_reason == "high_confidence_top2":
+        return f"已找到 {evidence_count} 条高相关资料，正在组织答案..."
+    if compression_reason == "medium_confidence_top3":
+        return f"已找到 {evidence_count} 条相关资料，正在组织答案..."
+    return f"已找到 {evidence_count} 条可参考资料，正在谨慎组织答案..."
+
+
+def _evidence_chars(evidence: list[object]) -> int:
+    return sum(len(getattr(item, "clean_text", "") or "") for item in evidence)
+
+
 def _timings_snapshot(start: float, timings: dict[str, int]) -> dict[str, int]:
     snapshot = dict(timings)
     snapshot["total_ms"] = _latency_ms(start)
@@ -1023,6 +1494,5 @@ def _refusal_message(understanding: QueryUnderstandingResult) -> str:
 
 _REFUSED_INTENTS = {
     Intent.invalid_input,
-    Intent.realtime_external,
     Intent.out_of_scope,
 }
