@@ -2,9 +2,9 @@
 import logoUrl from "../assets/logo-transparent.png";
 
 const navItems = [
-  { label: "智能问答", to: "/chat", code: "QA" },
-  { label: "文档管理", to: "/admin/documents", code: "DOC" },
-  { label: "基础日志", to: "/admin/logs", code: "LOG" }
+  { label: "智能问答", to: "/chat" },
+  { label: "文档管理", to: "/admin/documents" },
+  { label: "基础日志", to: "/admin/logs" }
 ];
 </script>
 
@@ -24,7 +24,6 @@ const navItems = [
           <span class="nav-label">Module 02 页面壳</span>
           <nav class="nav-list" aria-label="主导航">
             <RouterLink v-for="item in navItems" :key="item.to" class="nav-link" :to="item.to">
-              <span class="nav-chip">{{ item.code }}</span>
               <span>{{ item.label }}</span>
             </RouterLink>
           </nav>

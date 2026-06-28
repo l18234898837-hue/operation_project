@@ -2,10 +2,13 @@
 import { computed } from "vue";
 import { Link } from "@element-plus/icons-vue";
 
+import { formatConfidence, type AnswerTypeDescription } from "../../chat/qaPresentation";
 import type { QaReference } from "../../types/qa";
 
 const props = defineProps<{
   references: QaReference[];
+  answerDescription: AnswerTypeDescription;
+  confidence: number | null;
 }>();
 
 const documentFileNames = computed(() => {
@@ -21,8 +24,14 @@ const documentFileNames = computed(() => {
 <template>
   <section v-if="documentFileNames.length > 0" class="document-source-panel" aria-label="来源文档">
     <header class="document-source-head">
-      <Link class="source-icon" aria-hidden="true" />
-      <strong>来源文档</strong>
+      <span class="document-source-title">
+        <Link class="source-icon" aria-hidden="true" />
+        <strong>来源文档</strong>
+      </span>
+      <span :class="['document-source-meta', answerDescription.tone]">
+        {{ answerDescription.label }}
+        <b>{{ formatConfidence(confidence) }}</b>
+      </span>
     </header>
     <div class="document-source-list">
       <span v-for="fileName in documentFileNames" :key="fileName" class="document-source-chip">

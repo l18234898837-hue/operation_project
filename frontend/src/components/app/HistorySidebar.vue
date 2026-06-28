@@ -1,9 +1,13 @@
 <script setup lang="ts">
 import { ChatDotRound, MoreFilled, Plus, Search, SwitchButton, UserFilled } from "@element-plus/icons-vue";
-import { ref } from "vue";
+import { onBeforeUnmount } from "vue";
 
 import logoUrl from "../../assets/logo-transparent.png";
-import type { Conversation } from "../../chat/conversationModel";
+import type { ConversationHistoryItem } from "../../stores/chat";
+import {
+  createHistorySidebarMenuState,
+  isPointerInsideSidebarMenuControls
+} from "./historySidebarMenus";
 
 const searchQuery = defineModel<string>("searchQuery", { default: "" });
 
@@ -12,15 +16,19 @@ withDefaults(
     activeConversationId: string | null;
     historyGroups: Array<{
       label: string;
-      items: Conversation[];
+      items: ConversationHistoryItem[];
     }>;
     hasSearchResults?: boolean;
+    isSearching?: boolean;
+    searchResultCount?: number;
     userName?: string;
     userRoleLabel?: string;
     brandTo?: string;
   }>(),
   {
     hasSearchResults: true,
+    isSearching: false,
+    searchResultCount: 0,
     userName: "张工",
     userRoleLabel: "普通用户",
     brandTo: "/chat"
@@ -32,35 +40,73 @@ const emit = defineEmits<{
   new: [];
   delete: [conversationId: string];
   logout: [];
+  clearSearch: [];
 }>();
 
-const openConversationMenuId = ref<string | null>(null);
-const isUserMenuOpen = ref(false);
-
-function toggleConversationMenu(conversationId: string) {
-  openConversationMenuId.value = openConversationMenuId.value === conversationId ? null : conversationId;
-}
+const {
+  openConversationMenuId,
+  isUserMenuOpen,
+  toggleConversationMenu,
+  closeConversationMenu,
+  toggleUserMenu,
+  closeUserMenu,
+  closeAllMenus
+} = createHistorySidebarMenuState();
 
 function selectConversation(conversationId: string) {
-  openConversationMenuId.value = null;
+  closeConversationMenu();
   emit("select", conversationId);
 }
 
-function deleteConversation(conversation: Conversation) {
+function deleteConversation(conversation: ConversationHistoryItem) {
   if (window.confirm(`确定删除会话“${conversation.title}”？`)) {
     emit("delete", conversation.id);
   }
 
-  openConversationMenuId.value = null;
+  closeConversationMenu();
 }
 
 function createNewSession() {
-  openConversationMenuId.value = null;
+  closeAllMenus();
   emit("new");
 }
 
+function clearSearch() {
+  emit("clearSearch");
+}
+
+function handleDocumentPointerDown(event: PointerEvent) {
+  const hasOpenMenu = isUserMenuOpen.value || openConversationMenuId.value !== null;
+
+  if (!hasOpenMenu || event.button !== 0) {
+    return;
+  }
+
+  if (isPointerInsideSidebarMenuControls(event.target)) {
+    return;
+  }
+
+  closeAllMenus();
+}
+
+function handleDocumentKeydown(event: KeyboardEvent) {
+  if (event.key === "Escape") {
+    closeAllMenus();
+  }
+}
+
+if (typeof document !== "undefined") {
+  document.addEventListener("pointerdown", handleDocumentPointerDown, true);
+  document.addEventListener("keydown", handleDocumentKeydown);
+}
+
+onBeforeUnmount(() => {
+  document.removeEventListener("pointerdown", handleDocumentPointerDown, true);
+  document.removeEventListener("keydown", handleDocumentKeydown);
+});
+
 function logout() {
-  isUserMenuOpen.value = false;
+  closeUserMenu();
   emit("logout");
 }
 </script>
@@ -83,8 +129,13 @@ function logout() {
       </button>
     </div>
 
+    <p v-if="isSearching" class="history-search-summary">
+      找到 {{ searchResultCount }} 个相关会话
+      <button type="button" @click="clearSearch">清空</button>
+    </p>
+
     <div class="history-groups">
-      <p v-if="!hasSearchResults" class="history-empty">没有找到相关会话</p>
+      <p v-if="!hasSearchResults" class="history-empty">没有找到相关会话，可换个关键词试试</p>
 
       <template v-else>
         <section v-for="group in historyGroups" :key="group.label" class="history-group">
@@ -99,7 +150,11 @@ function logout() {
             <button class="history-item" type="button" @click="selectConversation(item.id)">
               <ChatDotRound class="history-item-icon" aria-hidden="true" />
               <span>{{ item.title }}</span>
-              <time>{{ item.time }}</time>
+              <em v-if="isSearching && item.matchedMessageSnippet">
+                {{ item.matchType === "title_message" ? "标题和内容命中" : "内容命中" }}：{{ item.matchedMessageSnippet }}
+              </em>
+              <small v-else-if="isSearching && item.matchType === 'title'">标题命中</small>
+              <time>{{ item.displayTime }}</time>
             </button>
 
             <button
@@ -112,20 +167,24 @@ function logout() {
               <MoreFilled aria-hidden="true" />
             </button>
 
-            <div v-if="openConversationMenuId === item.id" class="history-menu">
-              <button type="button" @click="deleteConversation(item)">删除会话</button>
+            <div
+              v-if="openConversationMenuId === item.id"
+              class="history-menu"
+              role="menu"
+            >
+              <button type="button" role="menuitem" @click="deleteConversation(item)">删除会话</button>
             </div>
           </div>
         </section>
       </template>
     </div>
 
-    <div class="chat-user-card">
+    <div class="chat-user-card" :class="{ open: isUserMenuOpen }">
       <button
         class="user-menu-toggle"
         type="button"
         :aria-expanded="isUserMenuOpen"
-        @click="isUserMenuOpen = !isUserMenuOpen"
+        @click="toggleUserMenu"
       >
         <span class="user-avatar"><UserFilled aria-hidden="true" /></span>
         <span>
@@ -134,8 +193,16 @@ function logout() {
         </span>
       </button>
 
-      <div v-if="isUserMenuOpen" class="user-menu">
-        <button type="button" @click="logout">
+      <div v-if="isUserMenuOpen" class="user-menu" role="menu">
+        <div class="user-menu-profile">
+          <span class="user-menu-avatar"><UserFilled aria-hidden="true" /></span>
+          <div>
+            <strong>{{ userName }}</strong>
+            <p>{{ userRoleLabel }}</p>
+          </div>
+        </div>
+
+        <button class="user-menu-logout" type="button" role="menuitem" @click="logout">
           <SwitchButton aria-hidden="true" />
           退出系统
         </button>
