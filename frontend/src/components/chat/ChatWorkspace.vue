@@ -1,13 +1,11 @@
 <script setup lang="ts">
-import { Link } from "@element-plus/icons-vue";
 import { nextTick, ref, watch } from "vue";
 
 import logoUrl from "../../assets/logo-transparent.png";
-import { formatConfidence } from "../../chat/qaPresentation";
 import { recommendedQuestions } from "../../chat/recommendedQuestions";
 import type { AnswerTypeDescription } from "../../chat/qaPresentation";
+import { canRegenerateAssistantMessage } from "../../chat/retryVisibility";
 import type { ChatMessage, ChatStatus } from "../../chat/conversationModel";
-import type { QaAskResponse } from "../../types/qa";
 import AnswerCard from "./AnswerCard.vue";
 import ChatComposer from "./ChatComposer.vue";
 import RecommendedQuestions from "./RecommendedQuestions.vue";
@@ -18,7 +16,6 @@ const props = withDefaults(defineProps<{
   pageTitle: string;
   messages: ChatMessage[];
   status: ChatStatus;
-  latestResponse: QaAskResponse | null;
   answerDescription: AnswerTypeDescription;
   canSend: boolean;
   copyMessage: string;
@@ -46,7 +43,12 @@ async function scrollToBottom() {
 }
 
 watch(
-  () => [props.messages.length, props.status],
+  () => [
+    props.messages.length,
+    props.status,
+    props.messages.at(-1)?.content.length ?? 0,
+    props.streamStatusMessage
+  ],
   () => {
     void scrollToBottom();
   }
@@ -58,11 +60,6 @@ watch(
     <header class="chat-workspace-head" :class="{ compact: messages.length > 0 }">
       <div>
         <h1>{{ pageTitle }}</h1>
-        <p v-if="latestResponse" :class="['answer-type-pill', answerDescription.tone]">
-          <Link aria-hidden="true" />
-          {{ answerDescription.label }}
-          <span>{{ formatConfidence(latestResponse.confidence) }}</span>
-        </p>
       </div>
     </header>
 
@@ -79,6 +76,8 @@ watch(
         <AnswerCard
           v-for="message in messages"
           :key="message.id"
+          :answer-description="answerDescription"
+          :can-retry="canRegenerateAssistantMessage(messages, message)"
           :message="message"
           :status-text="streamStatusMessage"
           @copy="emit('copy', $event)"

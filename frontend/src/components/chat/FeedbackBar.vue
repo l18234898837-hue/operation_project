@@ -3,8 +3,10 @@ import { CopyDocument, Refresh } from "@element-plus/icons-vue";
 
 withDefaults(defineProps<{
   showCopy?: boolean;
+  showRetry?: boolean;
 }>(), {
-  showCopy: true
+  showCopy: true,
+  showRetry: true
 });
 
 defineEmits<{
@@ -19,7 +21,7 @@ defineEmits<{
       <CopyDocument aria-hidden="true" />
       复制
     </button>
-    <button type="button" @click="$emit('retry')">
+    <button v-if="showRetry" type="button" @click="$emit('retry')">
       <Refresh aria-hidden="true" />
       重新生成
     </button>

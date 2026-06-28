@@ -16,11 +16,9 @@ defineEmits<{
       v-for="item in items"
       :key="item.text"
       class="recommended-chip"
-      :class="item.tone"
       type="button"
       @click="$emit('ask', item.text)"
     >
-      <component :is="item.icon" class="recommended-icon" aria-hidden="true" />
       <span>{{ item.text }}</span>
     </button>
   </div>

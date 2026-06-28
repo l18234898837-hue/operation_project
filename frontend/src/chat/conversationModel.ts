@@ -92,6 +92,12 @@ function sanitizeMessage(value: unknown): ChatMessage | null {
   };
 }
 
+export function getFirstUserQuestionTitle(messages: readonly ChatMessage[], fallbackTitle = "未命名会话") {
+  const firstUserQuestion = messages.find((message) => message.role === "user")?.content.trim();
+
+  return firstUserQuestion || fallbackTitle;
+}
+
 function sanitizeConversation(value: unknown): Conversation | null {
   if (!isRecord(value) || typeof value.id !== "string") {
     return null;
@@ -100,12 +106,13 @@ function sanitizeConversation(value: unknown): Conversation | null {
   const messages = Array.isArray(value.messages) ? value.messages.map(sanitizeMessage).filter((item) => item !== null) : [];
   const status = isChatStatus(value.status) ? value.status : "idle";
   const restoredStatus = status === "asking" || status === "streaming" ? "error" : status;
+  const fallbackTitle = typeof value.title === "string" && value.title.trim() ? value.title : "未命名会话";
   const now = Date.now();
 
   return {
     id: value.id,
     backendSessionId: typeof value.backendSessionId === "string" ? (value.backendSessionId as BackendSessionId) : undefined,
-    title: typeof value.title === "string" && value.title.trim() ? value.title : "未命名会话",
+    title: getFirstUserQuestionTitle(messages, fallbackTitle),
     time: typeof value.time === "string" ? value.time : "",
     group: typeof value.group === "string" ? value.group : "更早",
     status: restoredStatus,

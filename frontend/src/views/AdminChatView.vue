@@ -17,7 +17,8 @@ const {
   hasHistorySearchResults,
   historyGroups,
   historyQuery,
-  latestResponse,
+  historySearchResultCount,
+  isHistorySearching,
   messages,
   pageTitle,
   question,
@@ -39,8 +40,11 @@ function logout() {
       brand-to="/admin/chat"
       :has-search-results="hasHistorySearchResults"
       :history-groups="historyGroups"
+      :is-searching="isHistorySearching"
+      :search-result-count="historySearchResultCount"
       user-name="管理员"
       user-role-label="系统管理员"
+      @clear-search="chatStore.clearHistorySearch"
       @delete="chatStore.deleteConversation"
       @logout="logout"
       @new="chatStore.newConversation"
@@ -53,7 +57,6 @@ function logout() {
       :can-send="canSend"
       :copy-message="copyMessage"
       :error-message="errorMessage"
-      :latest-response="latestResponse"
       :messages="messages"
       :page-title="pageTitle"
       :status="status"

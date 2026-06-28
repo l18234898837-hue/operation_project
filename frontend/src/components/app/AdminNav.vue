@@ -31,7 +31,6 @@ const collapsed = defineModel<boolean>("collapsed", { required: true });
           <component :is="item.icon" aria-hidden="true" />
         </span>
         <strong>{{ item.label }}</strong>
-        <em>{{ item.code }}</em>
       </RouterLink>
     </nav>
   </aside>

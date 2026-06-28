@@ -19,6 +19,17 @@ interface ActiveStreamState {
   statusMessage: string;
 }
 
+export interface ConversationHistoryItem extends Conversation {
+  displayTime: string;
+  displayGroup: string;
+  matchedMessageSnippet: string | null;
+  matchType: "title" | "message" | "title_message" | null;
+}
+
+export function shouldUseQuestionAsConversationTitle(conversation: Pick<Conversation, "messages">) {
+  return !conversation.messages.some((message) => message.role === "user");
+}
+
 function createMessageId() {
   return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
@@ -71,6 +82,84 @@ function currentHistoryTime(timestamp: number) {
     minute: "2-digit",
     hour12: false
   }).format(now);
+}
+
+export function getConversationHistoryGroup(timestamp: number) {
+  const date = new Date(timestamp);
+  const today = new Date();
+  const startOfToday = new Date(today.getFullYear(), today.getMonth(), today.getDate()).getTime();
+  const startOfDate = new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
+  const daysAgo = Math.floor((startOfToday - startOfDate) / 86_400_000);
+
+  if (daysAgo === 0) {
+    return "\u4eca\u5929";
+  }
+
+  if (daysAgo === 1) {
+    return "\u6628\u5929";
+  }
+
+  return "\u66f4\u65e9";
+}
+
+export function formatConversationHistoryTime(timestamp: number) {
+  const date = new Date(timestamp);
+
+  if (getConversationHistoryGroup(timestamp) === "\u66f4\u65e9") {
+    return new Intl.DateTimeFormat("zh-CN", {
+      month: "2-digit",
+      day: "2-digit"
+    }).format(date);
+  }
+
+  return new Intl.DateTimeFormat("zh-CN", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false
+  }).format(date);
+}
+
+function normalizeHistorySearchQuery(query: string) {
+  return query.trim().toLocaleLowerCase();
+}
+
+function buildMatchedMessageSnippet(content: string, normalizedQuery: string) {
+  const normalizedContent = content.toLocaleLowerCase();
+  const matchIndex = normalizedContent.indexOf(normalizedQuery);
+
+  if (matchIndex === -1) {
+    return content.slice(0, 42);
+  }
+
+  const start = Math.max(0, matchIndex - 14);
+  const end = Math.min(content.length, matchIndex + normalizedQuery.length + 24);
+  const prefix = start > 0 ? "..." : "";
+  const suffix = end < content.length ? "..." : "";
+
+  return `${prefix}${content.slice(start, end)}${suffix}`;
+}
+
+function getHistorySearchMatch(conversation: Conversation, normalizedQuery: string) {
+  if (!normalizedQuery) {
+    return {
+      matchedMessageSnippet: null,
+      matchType: null
+    } satisfies Pick<ConversationHistoryItem, "matchedMessageSnippet" | "matchType">;
+  }
+
+  const titleMatches = conversation.title.toLocaleLowerCase().includes(normalizedQuery);
+  const matchedMessage = conversation.messages.find((message) =>
+    message.content.toLocaleLowerCase().includes(normalizedQuery)
+  );
+
+  if (!titleMatches && !matchedMessage) {
+    return null;
+  }
+
+  return {
+    matchedMessageSnippet: matchedMessage ? buildMatchedMessageSnippet(matchedMessage.content, normalizedQuery) : null,
+    matchType: titleMatches && matchedMessage ? "title_message" : titleMatches ? "title" : "message"
+  } satisfies Pick<ConversationHistoryItem, "matchedMessageSnippet" | "matchType">;
 }
 
 function buildStreamingResponse(
@@ -167,7 +256,47 @@ export const useChatStore = defineStore("chat", () => {
       }))
       .filter((group) => group.items.length > 0);
   });
-  const hasHistorySearchResults = computed(() => historyQuery.value.trim().length === 0 || historyGroups.value.length > 0);
+  const derivedHistoryGroups = computed(() => {
+    const normalizedQuery = normalizeHistorySearchQuery(historyQuery.value);
+    const groupLabels = ["\u4eca\u5929", "\u6628\u5929", "\u66f4\u65e9"];
+    const matchedConversations = conversations.value
+      .map((conversation) => {
+        const match = getHistorySearchMatch(conversation, normalizedQuery);
+
+        if (!match) {
+          return null;
+        }
+
+        return { conversation, match };
+      })
+      .filter((item) => item !== null);
+    const sortedConversations = [...matchedConversations].sort(
+      (left, right) => right.conversation.updatedAt - left.conversation.updatedAt
+    );
+
+    return groupLabels
+      .map((label) => {
+        const items: ConversationHistoryItem[] = sortedConversations
+          .filter(({ conversation }) => getConversationHistoryGroup(conversation.updatedAt) === label)
+          .map(({ conversation, match }) => ({
+            ...conversation,
+            displayGroup: label,
+            displayTime: formatConversationHistoryTime(conversation.updatedAt),
+            matchedMessageSnippet: match.matchedMessageSnippet,
+            matchType: match.matchType
+          }));
+
+        return { label, items };
+      })
+      .filter((group) => group.items.length > 0);
+  });
+  const isHistorySearching = computed(() => normalizeHistorySearchQuery(historyQuery.value).length > 0);
+  const historySearchResultCount = computed(() =>
+    derivedHistoryGroups.value.reduce((total, group) => total + group.items.length, 0)
+  );
+  const hasHistorySearchResults = computed(
+    () => !isHistorySearching.value || historySearchResultCount.value > 0
+  );
 
   watch(
     [conversations, activeConversationId],
@@ -200,6 +329,10 @@ export const useChatStore = defineStore("chat", () => {
 
   function isActiveConversation(conversationId: string) {
     return activeConversationId.value === conversationId;
+  }
+
+  function triggerConversationRender() {
+    conversations.value = [...conversations.value];
   }
 
   function setActiveStreamState(conversationId: string, state: ActiveStreamState) {
@@ -285,6 +418,10 @@ export const useChatStore = defineStore("chat", () => {
     copyMessage.value = "";
   }
 
+  function clearHistorySearch() {
+    historyQuery.value = "";
+  }
+
   function deleteConversation(conversationId: string) {
     const isDeletingActive = activeConversationId.value === conversationId;
     const isDeletingStreamingConversation = activeStreams.value.has(conversationId);
@@ -327,7 +464,10 @@ export const useChatStore = defineStore("chat", () => {
     activeConversationId.value = conversationId;
 
     if (existingConversation) {
-      existingConversation.title = normalizedQuestion;
+      if (shouldUseQuestionAsConversationTitle(existingConversation)) {
+        existingConversation.title = normalizedQuestion;
+      }
+
       existingConversation.backendSessionId = backendSessionId;
       existingConversation.status = "asking";
       existingConversation.messages = [...existingConversation.messages, userMessage];
@@ -366,7 +506,7 @@ export const useChatStore = defineStore("chat", () => {
     const assistantMessage: ChatMessage = {
       id: createMessageId(),
       role: "assistant",
-      content: "",
+      content: "正在生成回答...",
       createdAt: currentChatTime(),
       status: "streaming"
     };
@@ -378,6 +518,7 @@ export const useChatStore = defineStore("chat", () => {
 
     conversation.status = "asking";
     conversation.messages = [...conversation.messages, assistantMessage];
+    triggerConversationRender();
     setActiveStreamState(conversationId, {
       controller,
       messageId: assistantMessage.id,
@@ -432,6 +573,7 @@ export const useChatStore = defineStore("chat", () => {
             streamedAnswer,
             streamedReferences
           );
+          triggerConversationRender();
           break;
         case "references":
           streamedReferences = event.data.references;
@@ -441,6 +583,7 @@ export const useChatStore = defineStore("chat", () => {
             streamedAnswer,
             streamedReferences
           );
+          triggerConversationRender();
           break;
         case "done":
           targetConversation.backendSessionId = event.data.session_id;
@@ -448,6 +591,7 @@ export const useChatStore = defineStore("chat", () => {
           targetMessage.content = event.data.answer;
           targetMessage.response = event.data;
           targetMessage.status = "complete";
+          triggerConversationRender();
           clearActiveStreamStatus(conversationId);
           updateConversationTimestamp(targetConversation);
           removeActiveStreamState(conversationId, controller);
@@ -568,9 +712,12 @@ export const useChatStore = defineStore("chat", () => {
     pageTitle,
     answerDescription,
     canSend,
-    historyGroups,
+    historyGroups: derivedHistoryGroups,
     hasHistorySearchResults,
+    historySearchResultCount,
+    isHistorySearching,
     newConversation,
+    clearHistorySearch,
     deleteConversation,
     sendQuestion,
     selectConversation,

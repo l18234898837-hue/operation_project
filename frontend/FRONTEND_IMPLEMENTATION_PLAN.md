@@ -54,8 +54,8 @@
 
 - 左侧为会话历史侧栏，包含搜索、今天/昨天/更早分组和用户信息。
 - 右侧为问答主区域。
-- 空状态包含机器人图标、问候语、推荐问题。
-- 问答状态包含顶部问题标题、用户气泡、机器人回答卡片、引用来源折叠区、复制和重新生成按钮。
+- 空状态包含机器人图标、问候语、纯文字推荐问题按钮。
+- 问答状态包含顶部问题标题、用户气泡、机器人回答卡片、引用来源折叠区、复制按钮；仅当前会话最新一条助手回答显示重新生成按钮，历史助手回答只保留复制。
 - 输入框固定在底部。
 
 实现建议：
@@ -138,7 +138,7 @@
 - 登录页已按设计图校正为居中单卡片结构，使用项目图标库和透明背景 logo，密码显示/隐藏可交互。
 - `/chat` 已实现普通用户全屏问答工作区，包含历史会话、推荐问题、消息流、底部输入框、真实 `POST /api/qa/ask` 调用、引用展示、复制、重试和反馈入口。
 - `/admin/chat` 已接入 `AdminShell`，复用普通用户问答组件和 `chat` store，避免重复实现问答链路。
-- 管理端最左侧导航已独立为 `AdminNav`，支持折叠/展开；折叠后左栏宽度为 0，只在页面最左边缘保留与展开态同尺寸的展开按钮，并把状态写入 `localStorage`。
+- 管理端最左侧导航已独立为 `AdminNav`，支持折叠/展开；展开和折叠时都使用贴左边缘的同尺寸浮动按钮，折叠后左栏宽度为 0，并把状态写入 `localStorage`。
 - 已建立 `api/`、`types/`、`stores/`、`components/`、`layouts/`、`chat/`、`styles/` 分层。
 
 主要差距：
@@ -395,13 +395,15 @@ PATCH /api/unanswered/{id}
 功能链路：
 
 - 空状态展示问候语和推荐问题。
-- 点击推荐问题：创建或复用当前会话，追加用户消息，调用 `POST /api/qa/ask`。
+- 点击纯文字推荐问题按钮：创建或复用当前会话，追加用户消息，调用 `POST /api/qa/ask`。
 - 输入框发送：同上；发送中禁用输入与按钮，防止重复提交。
-- 接口成功：追加助手消息，展示回答类型、置信度、引用来源、复制、重新生成、反馈入口。
+- 输入框文案：placeholder 使用宽泛提示“请输入你的问题”，输入框左下角以轻量键帽样式常驻显示“Enter 发送，Shift + Enter 换行”。
+- 接口成功：追加助手消息，展示回答类型、置信度、引用来源、复制和反馈入口；重新生成只对当前会话最新一条助手回答开放，历史助手回答不能重新生成。
 - 接口拒答：展示固定友好兜底话术和拒答原因，不展示伪来源。
 - 接口失败：保留用户问题，展示错误卡片和重试按钮；重试必须复用同一问题，不额外创建重复历史项。
 - 左侧历史会话点击：只切换右侧会话，不自动发送请求。
-- 搜索历史会话：按标题和最近问题过滤本地会话列表，后续接真实会话接口。
+- 会话标题：新会话使用第一条用户问题命名，后续追问只更新会话时间和消息流，不覆盖历史列表标题；读取本地缓存时也按第一条用户问题恢复标题。
+- 搜索历史会话：按标题和全部消息内容过滤本地会话列表，展示命中数量、命中类型、内容片段、空状态和清空入口；后续接真实会话接口时可把查询参数下沉到 `GET /api/sessions`。
 - 当前后端支持 `session_id`，前端发送时应保存后端会话 id；如果后端暂未返回 session id，则前端使用本地 id，并在文档中标明限制。
 
 建议文件：
@@ -410,10 +412,11 @@ PATCH /api/unanswered/{id}
 - `types/qa.ts`：`QaAskRequest`、`QaAskResponse`、`QaReference`。
 - `types/session.ts`：`ChatSession`、`ChatMessage`、`ChatMessageStatus`。
 - `stores/chat.ts`：会话列表、当前会话、发送问题、重试、复制、反馈状态。
-- `components/app/HistorySidebar.vue`：历史列表、搜索、分组、切换会话。
+- `components/app/HistorySidebar.vue`：历史列表、搜索、分组、切换会话、会话删除菜单和账户菜单；账户菜单与会话删除菜单均支持点击触发按钮打开，左键点击菜单/触发按钮/用户卡片以外的任意窗体区域或按 `Esc` 收起，外部点击使用捕获阶段监听以避免被页面内部事件拦截。
 - `components/chat/ChatWorkspace.vue`：问答主工作区。
 - `components/chat/ChatComposer.vue`：输入框和发送按钮。
-- `components/chat/AnswerCard.vue`：回答内容、类型、置信度、操作按钮。
+- `components/chat/AnswerCard.vue`：回答内容和操作按钮；消息流已补齐用户/系统头像，系统消息使用纯白底项目透明 logo，用户消息使用用户图标，左右镜像排列以贴近真实聊天界面；助手回答通过 `MarkdownAnswer` 渲染标题、列表、加粗、行内代码和代码块，避免直接裸显 `###`、`**` 等 Markdown 标记；回答类型、置信度随 `SourceReferences` 展示在回答底部的“来源文档”区域，不放在页面顶部问题标题下；重新生成按钮由 `retryVisibility` 统一控制，只在最新助手回答上显示。
+- `components/chat/MarkdownAnswer.vue` + `chat/markdownRenderer.ts`：实现安全的轻量 Markdown 子集解析与渲染，不使用 `v-html` 直接插入模型返回内容。
 - `components/chat/SourceReferences.vue`：引用折叠列表。
 - `components/chat/FeedbackBar.vue`：点赞、点踩、反馈原因。
 
@@ -424,7 +427,7 @@ PATCH /api/unanswered/{id}
 - `rag` 展示引用；`general_llm` 明确提示未使用知识库；`refused` 不展示来源。
 - 后端未启动或模型配置错误时，不丢失用户问题，可点击重试。
 - 复制按钮能把当前回答写入剪贴板，并给出成功提示。
-- 重新生成会基于同一问题重新调用接口，并替换或追加新回答，行为需在 UI 中明确。
+- 重新生成会基于同一问题重新调用接口，并替换或追加新回答；该入口只显示在当前会话最新一条助手回答上，历史助手回答只能复制，避免从旧回答触发上下文不明确的重试。
 
 ### 7.4 引用来源链路
 
@@ -637,14 +640,17 @@ PATCH /api/unanswered/{id}
 
 ### Step 3：实现问答工作区
 
-状态：已完成第一版实现，并完成架构拆分，等待人工测试确认。当前 `/chat` 已从后台 `AppShell` 拆出为普通用户全屏问答页，按设计图实现左侧历史会话、空状态推荐问题、问答消息流、底部输入框、发送中、错误重试和基础引用展示；已接入真实 `POST /api/qa/ask`。左侧历史会话已改为本地会话切换，点击历史项会切换右侧对应会话内容，不再重复发送该历史问题。
+状态：已完成第一版实现，并完成架构拆分，等待人工测试确认。当前 `/chat` 已从后台 `AppShell` 拆出为普通用户全屏问答页，按设计图实现左侧历史会话、空状态推荐问题、问答消息流、底部输入框、发送中、错误重试和基础引用展示；已接入真实 `POST /api/qa/ask`。消息流已补齐用户头像和系统助手头像，用户消息右侧显示用户图标，系统消息左侧显示纯白底项目透明 logo，更接近真实聊天界面。左侧历史会话已改为本地会话切换，点击历史项会切换右侧对应会话内容，不再重复发送该历史问题；历史搜索已补齐完整本地链路，支持标题/消息内容搜索、命中数量、命中片段、空状态和清空入口；左下角账户菜单与历史会话删除菜单已统一为轻量弹层，支持点击空白处和 `Esc` 收起。
 
 本步架构更新：
 
-- 新增 `src/stores/chat.ts`，统一承载会话列表、当前会话、发送问题、重试、复制、错误状态和推荐问题发问链路。
-- 新增 `src/components/app/HistorySidebar.vue`，承载历史分组、会话切换和用户信息。
+- 新增 `src/stores/chat.ts`，统一承载会话列表、当前会话、发送问题、重试、复制、错误状态、推荐问题发问和历史搜索链路。
+- 新增 `src/chat/conversationTitle.contract.ts`，约束会话标题只能由第一条用户问题决定，防止连续追问时被最后一个问题覆盖。
+- 新增 `src/components/app/HistorySidebar.vue`，承载历史分组、会话切换、搜索结果反馈、用户信息、会话删除菜单和账户菜单弹层。
+- 新增 `src/components/app/historySidebarMenus.ts` 与 `historySidebarMenus.contract.ts`，统一历史侧栏弹层状态、点击外部关闭和 `Esc` 关闭行为；外部点击关闭使用捕获阶段监听，仅把历史菜单本体、更多按钮和用户卡片视为内部点击区域。
 - 新增 `src/components/chat/ChatWorkspace.vue`，承载问答主区域、空状态、消息流和输入框组合。
 - 新增 `src/components/chat/ChatComposer.vue`、`AnswerCard.vue`、`SourceReferences.vue`、`FeedbackBar.vue`、`RecommendedQuestions.vue`，为后续管理员问答页复用做准备。
+- 新增 `src/chat/retryVisibility.ts` 与 `retryVisibility.contract.ts`，约束重新生成入口只出现在当前会话最新一条助手回答上，历史助手回答只保留复制。
 - 新增 `src/chat/chatStore.contract.ts` 作为轻量编译期契约，约束 store 必须暴露真实功能链路所需的 API。
 - 新增 `src/chat/clipboard.ts`，复制回答时优先使用 Clipboard API，失败时降级到隐藏 textarea 复制，并在页面显示复制成功/失败提示。
 - `ChatView.vue` 现在只负责连接 store 与页面布局，不再堆叠业务状态。
@@ -673,7 +679,7 @@ PATCH /api/unanswered/{id}
 
 ### Step 4：实现引用组件
 
-状态：已完成用户端第一版引用组件，等待人工测试确认；管理员端复制 `segment_id` / `document_id` 的调试能力后续在管理员问答页或日志详情中补齐。
+状态：已完成用户端第一版引用组件，并完成回答正文 Markdown 富文本渲染优化，等待人工测试确认；管理员端复制 `segment_id` / `document_id` 的调试能力后续在管理员问答页或日志详情中补齐。
 
 目标：
 
@@ -696,7 +702,7 @@ PATCH /api/unanswered/{id}
 
 ### Step 5：实现管理员 Shell
 
-状态：已完成，并按人工测试反馈完成折叠交互微调。当前已新增 `/admin/chat`，管理员端最左侧应用导航已独立为 `AdminNav`，管理端页面统一挂载在 `AdminShell` 下。管理员问答页复用普通用户的 `HistorySidebar`、`ChatWorkspace` 和 `chat` store，因此发送、引用、拒答、重试、复制等链路不会重复实现。管理员身份只在历史侧栏左下角显示“管理员 / 系统管理员”，最左侧应用导航不额外显示说明卡。最左侧应用导航支持折叠/展开；折叠后左栏彻底收起，只在页面最左边缘保留一个与展开态按钮同尺寸的展开符号，折叠状态写入 `localStorage`，刷新后保持。
+状态：已完成，并按人工测试反馈完成折叠交互微调。当前已新增 `/admin/chat`，管理员端最左侧应用导航已独立为 `AdminNav`，管理端页面统一挂载在 `AdminShell` 下。管理员问答页复用普通用户的 `HistorySidebar`、`ChatWorkspace` 和 `chat` store，因此发送、引用、拒答、重试、复制等链路不会重复实现。管理员身份只在历史侧栏左下角显示“管理员 / 系统管理员”，最左侧应用导航不额外显示说明卡。最左侧应用导航支持折叠/展开；展开和折叠时都使用贴左边缘的同尺寸浮动按钮，折叠后左栏彻底收起，折叠状态写入 `localStorage`，刷新后保持。
 
 目标：
 
@@ -713,7 +719,7 @@ PATCH /api/unanswered/{id}
 - 新增 `src/views/AdminChatView.vue`，复用已有问答组件和 store。
 - `HistorySidebar` 支持传入用户名称、角色文案和品牌跳转地址，避免管理员页显示普通用户身份。
 - 移除最左侧导航底部额外说明卡，管理员身份信息只保留在设计图对应的左下角位置。
-- `AdminNav` 增加折叠按钮；展开时显示 logo、图标、中文和英文缩写，折叠时左栏宽度收为 0，只在页面最左边缘贴边显示一个展开符号，按钮尺寸保持与展开态一致。
+- `AdminNav` 增加贴左边缘的浮动折叠按钮；展开时显示 logo、图标和中文导航名称，不再显示 QA / DOC / LOG 英文缩写，折叠时左栏宽度收为 0，按钮尺寸和位置在展开/折叠状态下保持一致。
 - 路由新增 `/admin/chat`，并将 `/admin/documents`、`/admin/logs` 切换到 `AdminShell` 下；旧 `/admin/unanswered` 重定向到 `/admin/logs`。
 - 新增 `src/router/adminShell.contract.ts`，约束管理员 Shell 相关模块和路由存在。
 - 新增 `src/router/unansweredConsolidation.contract.ts`，约束未命中问题不作为独立管理员导航入口。
@@ -721,7 +727,7 @@ PATCH /api/unanswered/{id}
 验收：
 
 - 管理员访问 `/admin/chat` 可看到最左侧管理员导航 + 中间历史会话 + 右侧问答区。
-- 点击最左侧导航折叠按钮后，导航栏彻底收起，只在页面最左边缘保留一个与展开态同尺寸的展开符号；再次点击可展开。
+- 点击最左侧贴边浮动按钮后，导航栏彻底收起；再次点击可展开，按钮尺寸和贴边位置保持一致。
 - 折叠/展开状态刷新后保持。
 - 管理员访问 `/admin/documents`、`/admin/logs` 有统一导航，旧 `/admin/unanswered` 会回到日志页。
 - 普通用户无法通过 UI 进入管理导航。
@@ -991,6 +997,7 @@ npm run test
 | 管理员和用户问答逻辑重复 | 后期维护成本高 | 抽 `ChatWorkspace` 复用 |
 | 只做静态 mock 页面 | 用户无法验证真实流程 | 每个模块必须实现可点击、可筛选、可切换、可重试的本地或真实链路 |
 | 后端模型 API 未配置 | RAG 问题返回接口错误 | 前端展示可恢复错误；环境层补真实 `.env` 后再验收 RAG 成功路径 |
+| 左侧会话时间使用缓存文本 | 跨天或旧 localStorage 数据可能显示不准 | 侧栏展示和“今天/昨天/更早”分组统一由 `updatedAt` 动态计算；`time/group` 仅作为历史兼容字段保留 |
 
 ## 12. 结论
 
