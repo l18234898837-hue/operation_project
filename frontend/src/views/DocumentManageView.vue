@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, onMounted, ref } from "vue";
 import {
   CircleCheck,
   Clock,
@@ -17,10 +17,10 @@ import type { DocumentItem, DocumentType } from "../types/document";
 const documentStore = useDocumentStore();
 const failureDialogVisible = ref(false);
 const selectedFailure = ref<DocumentItem | null>(null);
-const uploadName = ref("新上传运维资料.pdf");
-const uploadType = ref<DocumentType>("PDF");
 
-const uploadTypeOptions: DocumentType[] = ["PDF", "Word", "Excel", "Markdown", "TXT"];
+onMounted(() => {
+  void documentStore.loadDocuments();
+});
 
 const categoryTabs = computed(() => [
   ...documentStore.categories,
@@ -67,7 +67,7 @@ const metricCards = computed(() => [
 
 function statusLabel(document: DocumentItem) {
   if (document.parseStatus === "processing") {
-    return `解析中 (${document.progress ?? 0}%)`;
+    return `解析中(${document.progress ?? 0}%)`;
   }
 
   const labels = {
@@ -87,15 +87,10 @@ function showFailure(document: DocumentItem) {
   selectedFailure.value = document;
   failureDialogVisible.value = true;
 }
-
-async function uploadMock() {
-  const safeName = uploadName.value.trim() || `新上传资料.${uploadType.value.toLowerCase()}`;
-  await documentStore.uploadMockDocument(safeName, uploadType.value);
-}
 </script>
 
 <template>
-  <section class="document-page">
+  <section class="document-page" :aria-busy="documentStore.isLoading">
     <aside class="document-category-panel">
       <div class="document-category-head">
         <div>
@@ -134,7 +129,7 @@ async function uploadMock() {
           <span>管理知识库文档、解析任务与启用状态</span>
           <strong>当前分类：{{ documentStore.currentCategoryLabel }}</strong>
         </div>
-        <button class="document-upload-primary" type="button" @click="uploadMock">
+        <button class="document-upload-primary" type="button" disabled title="真实上传将在下一阶段接入">
           <Upload aria-hidden="true" />
           上传文档
         </button>
@@ -202,16 +197,29 @@ async function uploadMock() {
 
       <section class="document-upload-strip">
         <div>
-          <strong>模拟上传</strong>
-          <span>当前无真实上传接口，点击后会新增一条解析中记录。</span>
+          <strong>真实文档列表已接入</strong>
+          <span>当前页面读取后端知识库文档；文件上传和真实重新解析工作流将在下一阶段接入。</span>
         </div>
-        <input v-model="uploadName" aria-label="模拟上传文件名" />
-        <select v-model="uploadType" aria-label="模拟上传类型">
-          <option v-for="type in uploadTypeOptions" :key="type" :value="type">{{ type }}</option>
-        </select>
+        <button
+          class="document-reset"
+          type="button"
+          :disabled="documentStore.isLoading || documentStore.hasPendingDocumentActions"
+          @click="documentStore.loadDocuments"
+        >
+          <Refresh aria-hidden="true" />
+          {{ documentStore.isLoading ? "刷新中" : documentStore.hasPendingDocumentActions ? "处理中" : "刷新列表" }}
+        </button>
       </section>
 
-      <section class="document-table-card">
+      <p v-if="documentStore.errorMessage" class="document-notice error">
+        {{ documentStore.errorMessage }}
+      </p>
+
+      <div v-if="documentStore.isLoading" class="document-empty" aria-live="polite">
+        正在加载文档列表...
+      </div>
+
+      <section class="document-table-card" :aria-busy="documentStore.isLoading">
         <table class="document-table">
           <thead>
             <tr>
@@ -263,16 +271,27 @@ async function uploadMock() {
               </td>
               <td>
                 <div class="document-actions">
-                  <button type="button" @click="documentStore.toggleDocumentEnabled(document.id)">
-                    {{ document.enableStatus === "enabled" ? "禁用" : "启用" }}
+                  <button
+                    type="button"
+                    :disabled="documentStore.isDocumentPending(document.id)"
+                    @click="documentStore.toggleDocumentEnabled(document.id)"
+                  >
+                    {{
+                      documentStore.isDocumentPending(document.id)
+                        ? "处理中"
+                        : document.enableStatus === "enabled"
+                          ? "禁用"
+                          : "启用"
+                    }}
                   </button>
                   <button
                     v-if="document.parseStatus === 'failed'"
                     class="primary"
                     type="button"
+                    :disabled="documentStore.isDocumentPending(document.id)"
                     @click="documentStore.retryParse(document.id)"
                   >
-                    重新解析
+                    {{ documentStore.isDocumentPending(document.id) ? "处理中" : "重新解析" }}
                   </button>
                 </div>
               </td>
@@ -280,7 +299,7 @@ async function uploadMock() {
           </tbody>
         </table>
 
-        <div v-if="documentStore.paginatedDocuments.length === 0" class="document-empty">
+        <div v-if="!documentStore.isLoading && documentStore.paginatedDocuments.length === 0" class="document-empty">
           当前筛选条件下没有文档，试试重置筛选。
         </div>
       </section>
@@ -325,9 +344,10 @@ async function uploadMock() {
           v-if="selectedFailure"
           class="document-upload-primary dialog-action"
           type="button"
+          :disabled="documentStore.isDocumentPending(selectedFailure.id)"
           @click="documentStore.retryParse(selectedFailure.id); failureDialogVisible = false"
         >
-          重新解析
+          {{ documentStore.isDocumentPending(selectedFailure.id) ? "处理中" : "重新解析" }}
         </button>
       </template>
     </el-dialog>

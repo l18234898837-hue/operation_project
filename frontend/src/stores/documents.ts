@@ -1,8 +1,8 @@
 import { computed, ref } from "vue";
 import { defineStore } from "pinia";
 
-import { uploadDocument } from "../api/documents";
-import { baseDocumentCategories, mockDocuments } from "../mock/documents";
+import { listDocuments, retryDocumentParse, setDocumentEnabled } from "../api/documents";
+import { baseDocumentCategories } from "../mock/documents";
 import type {
   DocumentCategory,
   DocumentCategoryKey,
@@ -17,7 +17,7 @@ import type {
 const DEFAULT_PAGE_SIZE = 10;
 
 export const useDocumentStore = defineStore("documents", () => {
-  const documents = ref<DocumentItem[]>(mockDocuments.map((document) => ({ ...document })));
+  const documents = ref<DocumentItem[]>([]);
   const filters = ref<DocumentFilters>({
     category: "all",
     keyword: "",
@@ -27,7 +27,12 @@ export const useDocumentStore = defineStore("documents", () => {
     page: 1,
     pageSize: DEFAULT_PAGE_SIZE
   });
+  const isLoading = ref(false);
+  const errorMessage = ref("");
   const lastNotice = ref("");
+  const pendingDocumentIds = ref<Set<string>>(new Set());
+  const hasPendingDocumentActions = computed(() => pendingDocumentIds.value.size > 0);
+  let documentLoadRequestSequence = 0;
 
   const documentTypeOptions = computed<Array<{ label: string; value: DocumentType | "all" }>>(() => [
     { label: "全部类型", value: "all" },
@@ -104,6 +109,54 @@ export const useDocumentStore = defineStore("documents", () => {
     return filteredDocuments.value.slice(start, start + filters.value.pageSize);
   });
 
+  async function loadDocuments() {
+    if (hasPendingDocumentActions.value) {
+      return;
+    }
+
+    const requestSequence = ++documentLoadRequestSequence;
+    isLoading.value = true;
+    errorMessage.value = "";
+
+    try {
+      const nextDocuments = await listDocuments();
+      if (requestSequence !== documentLoadRequestSequence || hasPendingDocumentActions.value) {
+        return;
+      }
+
+      documents.value = nextDocuments;
+      resetPage();
+    } catch (error) {
+      if (requestSequence === documentLoadRequestSequence && !hasPendingDocumentActions.value) {
+        errorMessage.value = error instanceof Error ? error.message : "文档列表加载失败";
+      }
+    } finally {
+      if (requestSequence === documentLoadRequestSequence) {
+        isLoading.value = false;
+      }
+    }
+  }
+
+  function replaceDocument(nextDocument: DocumentItem) {
+    documents.value = documents.value.map((document) =>
+      document.id === nextDocument.id ? nextDocument : document
+    );
+  }
+
+  function isDocumentPending(id: string) {
+    return pendingDocumentIds.value.has(id);
+  }
+
+  function markDocumentPending(id: string) {
+    pendingDocumentIds.value = new Set(pendingDocumentIds.value).add(id);
+  }
+
+  function unmarkDocumentPending(id: string) {
+    const nextPendingIds = new Set(pendingDocumentIds.value);
+    nextPendingIds.delete(id);
+    pendingDocumentIds.value = nextPendingIds;
+  }
+
   function resetPage() {
     filters.value.page = 1;
   }
@@ -149,39 +202,46 @@ export const useDocumentStore = defineStore("documents", () => {
     };
   }
 
-  async function uploadMockDocument(name: string, type: DocumentType) {
-    const document = await uploadDocument(name, type);
-    documents.value = [document, ...documents.value];
-    lastNotice.value = "文档已加入解析队列，真实上传接口待后端接入";
-    resetPage();
+  async function toggleDocumentEnabled(id: string) {
+    const document = documents.value.find((item) => item.id === id);
+    if (!document || isDocumentPending(id)) {
+      return;
+    }
+
+    errorMessage.value = "";
+    const nextEnabled = document.enableStatus !== "enabled";
+    markDocumentPending(id);
+
+    try {
+      const updated = await setDocumentEnabled(id, nextEnabled);
+      replaceDocument(updated);
+      lastNotice.value = nextEnabled
+        ? "文档已启用，将参与 RAG 检索。"
+        : "文档已禁用，暂不参与 RAG 检索。";
+    } catch (error) {
+      errorMessage.value = error instanceof Error ? error.message : "文档启用状态更新失败";
+    } finally {
+      unmarkDocumentPending(id);
+    }
   }
 
-  function toggleDocumentEnabled(id: string) {
-    documents.value = documents.value.map((document) =>
-      document.id === id
-        ? {
-            ...document,
-            enableStatus: document.enableStatus === "enabled" ? "disabled" : "enabled",
-            updatedAt: new Date().toLocaleString("sv-SE").replace("T", " ")
-          }
-        : document
-    );
-  }
+  async function retryParse(id: string) {
+    if (isDocumentPending(id)) {
+      return;
+    }
 
-  function retryParse(id: string) {
-    documents.value = documents.value.map((document) =>
-      document.id === id
-        ? {
-            ...document,
-            parseStatus: "processing",
-            enableStatus: "disabled",
-            failureReason: null,
-            progress: 15,
-            updatedAt: new Date().toLocaleString("sv-SE").replace("T", " ")
-          }
-        : document
-    );
-    lastNotice.value = "已模拟重新解析，真实解析任务接口待后端接入";
+    errorMessage.value = "";
+    markDocumentPending(id);
+
+    try {
+      const updated = await retryDocumentParse(id);
+      replaceDocument(updated);
+      lastNotice.value = "已提交重新解析请求，文档已进入解析队列。";
+    } catch (error) {
+      errorMessage.value = error instanceof Error ? error.message : "重新解析请求提交失败";
+    } finally {
+      unmarkDocumentPending(id);
+    }
   }
 
   function getFailureReason(id: string) {
@@ -191,7 +251,11 @@ export const useDocumentStore = defineStore("documents", () => {
   return {
     documents,
     filters,
+    isLoading,
+    errorMessage,
     lastNotice,
+    pendingDocumentIds,
+    hasPendingDocumentActions,
     categories,
     currentCategoryLabel,
     summary,
@@ -201,6 +265,8 @@ export const useDocumentStore = defineStore("documents", () => {
     documentTypeOptions,
     parseStatusOptions,
     enableStatusOptions,
+    loadDocuments,
+    isDocumentPending,
     setCategory,
     setSearchKeyword,
     setTypeFilter,
@@ -208,7 +274,6 @@ export const useDocumentStore = defineStore("documents", () => {
     setEnableStatusFilter,
     setPage,
     resetFilters,
-    uploadMockDocument,
     toggleDocumentEnabled,
     retryParse,
     getFailureReason

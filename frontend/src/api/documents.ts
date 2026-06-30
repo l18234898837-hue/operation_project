@@ -1,28 +1,39 @@
-import { mockDocuments } from "../mock/documents";
-import type { DocumentItem, DocumentType } from "../types/document";
+import type { DocumentItem } from "../types/document";
+
+async function parseDocumentResponse(response: Response): Promise<DocumentItem> {
+  if (!response.ok) {
+    throw new Error(`Document request failed: ${response.status}`);
+  }
+
+  return (await response.json()) as DocumentItem;
+}
 
 export async function listDocuments(): Promise<DocumentItem[]> {
-  return mockDocuments.map((document) => ({ ...document }));
+  const response = await fetch("/api/documents");
+
+  if (!response.ok) {
+    throw new Error(`Document list request failed: ${response.status}`);
+  }
+
+  return (await response.json()) as DocumentItem[];
 }
 
-export async function uploadDocument(name: string, type: DocumentType): Promise<DocumentItem> {
-  return {
-    id: `doc-upload-${Date.now()}`,
-    name,
-    type,
-    category: "uncategorized",
-    parseStatus: "processing",
-    enableStatus: "disabled",
-    updatedAt: new Date().toLocaleString("sv-SE").replace("T", " "),
-    failureReason: null,
-    progress: 5
-  };
+export async function setDocumentEnabled(id: string, enabled: boolean): Promise<DocumentItem> {
+  const response = await fetch(`/api/documents/${id}/enabled`, {
+    method: "PATCH",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({ enabled })
+  });
+
+  return parseDocumentResponse(response);
 }
 
-export async function enableDocument(document: DocumentItem): Promise<DocumentItem> {
-  return { ...document, enableStatus: "enabled" };
-}
+export async function retryDocumentParse(id: string): Promise<DocumentItem> {
+  const response = await fetch(`/api/documents/${id}/retry`, {
+    method: "POST"
+  });
 
-export async function disableDocument(document: DocumentItem): Promise<DocumentItem> {
-  return { ...document, enableStatus: "disabled" };
+  return parseDocumentResponse(response);
 }
