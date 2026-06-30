@@ -1,7 +1,7 @@
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy import URL
 
@@ -39,6 +39,16 @@ class Settings(BaseSettings):
     redis_host: str = "127.0.0.1"
     redis_port: int = 6379
     redis_db: int = 0
+
+    upload_storage_dir: Path = PROJECT_ROOT / "backend" / "uploads" / "documents"
+    upload_max_bytes: int = 20 * 1024 * 1024
+
+    @field_validator("upload_storage_dir")
+    @classmethod
+    def resolve_upload_storage_dir(cls, value: Path) -> Path:
+        if value.is_absolute():
+            return value
+        return PROJECT_ROOT / value
 
     llm_base_url: str = ""
     llm_api_key: str = ""

@@ -17,6 +17,7 @@ import type { DocumentItem, DocumentType } from "../types/document";
 const documentStore = useDocumentStore();
 const failureDialogVisible = ref(false);
 const selectedFailure = ref<DocumentItem | null>(null);
+const uploadInput = ref<HTMLInputElement | null>(null);
 
 onMounted(() => {
   void documentStore.loadDocuments();
@@ -87,6 +88,26 @@ function showFailure(document: DocumentItem) {
   selectedFailure.value = document;
   failureDialogVisible.value = true;
 }
+
+function openUploadPicker() {
+  if (documentStore.isUploading || documentStore.isLoading || documentStore.hasPendingDocumentActions) {
+    return;
+  }
+
+  uploadInput.value?.click();
+}
+
+async function handleUploadChange(event: Event) {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0];
+  input.value = "";
+
+  if (!file) {
+    return;
+  }
+
+  await documentStore.uploadDocumentFile(file);
+}
 </script>
 
 <template>
@@ -129,9 +150,21 @@ function showFailure(document: DocumentItem) {
           <span>管理知识库文档、解析任务与启用状态</span>
           <strong>当前分类：{{ documentStore.currentCategoryLabel }}</strong>
         </div>
-        <button class="document-upload-primary" type="button" disabled title="真实上传将在下一阶段接入">
+        <input
+          ref="uploadInput"
+          class="document-hidden-file"
+          type="file"
+          accept=".md,.markdown,.txt,.pdf,.doc,.docx,.xls,.xlsx"
+          @change="handleUploadChange"
+        />
+        <button
+          class="document-upload-primary"
+          type="button"
+          :disabled="documentStore.isUploading || documentStore.isLoading || documentStore.hasPendingDocumentActions"
+          @click="openUploadPicker"
+        >
           <Upload aria-hidden="true" />
-          上传文档
+          {{ documentStore.isUploading ? "上传中" : "上传文档" }}
         </button>
       </header>
 
@@ -198,7 +231,7 @@ function showFailure(document: DocumentItem) {
       <section class="document-upload-strip">
         <div>
           <strong>真实文档列表已接入</strong>
-          <span>当前页面读取后端知识库文档；文件上传和真实重新解析工作流将在下一阶段接入。</span>
+          <span>Markdown/TXT 已支持真实入库；PDF/Word/Excel 会先保存为解析失败，待解析器接入后再处理。</span>
         </div>
         <button
           class="document-reset"

@@ -1,7 +1,7 @@
 import { computed, ref } from "vue";
 import { defineStore } from "pinia";
 
-import { listDocuments, retryDocumentParse, setDocumentEnabled } from "../api/documents";
+import { listDocuments, retryDocumentParse, setDocumentEnabled, uploadDocument } from "../api/documents";
 import { baseDocumentCategories } from "../mock/documents";
 import type {
   DocumentCategory,
@@ -28,6 +28,7 @@ export const useDocumentStore = defineStore("documents", () => {
     pageSize: DEFAULT_PAGE_SIZE
   });
   const isLoading = ref(false);
+  const isUploading = ref(false);
   const errorMessage = ref("");
   const lastNotice = ref("");
   const pendingDocumentIds = ref<Set<string>>(new Set());
@@ -110,7 +111,7 @@ export const useDocumentStore = defineStore("documents", () => {
   });
 
   async function loadDocuments() {
-    if (hasPendingDocumentActions.value) {
+    if (hasPendingDocumentActions.value || isUploading.value) {
       return;
     }
 
@@ -120,14 +121,14 @@ export const useDocumentStore = defineStore("documents", () => {
 
     try {
       const nextDocuments = await listDocuments();
-      if (requestSequence !== documentLoadRequestSequence || hasPendingDocumentActions.value) {
+      if (requestSequence !== documentLoadRequestSequence || hasPendingDocumentActions.value || isUploading.value) {
         return;
       }
 
       documents.value = nextDocuments;
       resetPage();
     } catch (error) {
-      if (requestSequence === documentLoadRequestSequence && !hasPendingDocumentActions.value) {
+      if (requestSequence === documentLoadRequestSequence && !hasPendingDocumentActions.value && !isUploading.value) {
         errorMessage.value = error instanceof Error ? error.message : "文档列表加载失败";
       }
     } finally {
@@ -225,6 +226,29 @@ export const useDocumentStore = defineStore("documents", () => {
     }
   }
 
+  async function uploadDocumentFile(file: File) {
+    if (isUploading.value || isLoading.value || hasPendingDocumentActions.value) {
+      return;
+    }
+
+    isUploading.value = true;
+    errorMessage.value = "";
+
+    try {
+      const uploaded = await uploadDocument(file);
+      documents.value = [uploaded, ...documents.value.filter((document) => document.id !== uploaded.id)];
+      resetPage();
+      lastNotice.value =
+        uploaded.parseStatus === "failed"
+          ? `文档已上传，但解析失败：${uploaded.failureReason || "不支持的文件格式"}`
+          : "文档已上传并导入";
+    } catch (error) {
+      errorMessage.value = error instanceof Error ? error.message : "文档上传失败";
+    } finally {
+      isUploading.value = false;
+    }
+  }
+
   async function retryParse(id: string) {
     if (isDocumentPending(id)) {
       return;
@@ -252,6 +276,7 @@ export const useDocumentStore = defineStore("documents", () => {
     documents,
     filters,
     isLoading,
+    isUploading,
     errorMessage,
     lastNotice,
     pendingDocumentIds,
@@ -274,6 +299,7 @@ export const useDocumentStore = defineStore("documents", () => {
     setEnableStatusFilter,
     setPage,
     resetFilters,
+    uploadDocumentFile,
     toggleDocumentEnabled,
     retryParse,
     getFailureReason

@@ -35,3 +35,7 @@ class DocumentItemSchema(BaseModel):
 
 class DocumentEnableRequest(BaseModel):
     enabled: bool
+
+
+class DocumentUploadErrorSchema(BaseModel):
+    message: str

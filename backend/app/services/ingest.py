@@ -69,6 +69,21 @@ async def import_markdown_document(
     embedding_client: EmbeddingClient,
     embedding_model: str,
 ) -> uuid.UUID:
+    document_id, _created = await import_markdown_document_with_result(
+        session=session,
+        document=document,
+        embedding_client=embedding_client,
+        embedding_model=embedding_model,
+    )
+    return document_id
+
+
+async def import_markdown_document_with_result(
+    session: Session,
+    document: MarkdownDocument,
+    embedding_client: EmbeddingClient,
+    embedding_model: str,
+) -> tuple[uuid.UUID, bool]:
     # 记录函数开始时间，用于计算解析总耗时(毫秒)
     started = time.perf_counter()
     # 声明文档主表实例变量，初始为空
@@ -86,7 +101,7 @@ async def import_markdown_document(
         ).scalar_one_or_none()
         # 查到已存在文档，直接返回已有文档ID，跳过全部导入逻辑，避免重复入库
         if existing is not None:
-            return existing.id
+            return existing.id, False
 
         # ====================== 2. 创建知识库文档主记录 ======================
         kb_document = KbDocument(
@@ -167,7 +182,7 @@ async def import_markdown_document(
         # 提交本次会话所有新增/修改数据到数据库（文档、任务、所有分片一次性落库）
         session.commit()
         # 返回当前文档唯一ID，供外层脚本打印输出
-        return kb_document.id
+        return kb_document.id, True
 
     # ====================== 异常捕获分支：导入流程任意步骤报错执行 ======================
     except Exception as exc:
