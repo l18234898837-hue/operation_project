@@ -1,14 +1,13 @@
 import uuid
 from datetime import UTC, datetime
 
-from app.models.rag import DocumentStatus, KbDocument, ParseTask, ParseTaskStatus
+from app.models.rag import DocumentStatus, KbDocument
 from app.schemas.documents import (
     DocumentEnableRequest,
     DocumentItemSchema,
 )
 from app.services.document_management import (
     map_document_item,
-    retry_document_parse,
     set_document_enabled,
 )
 
@@ -143,19 +142,9 @@ def test_map_document_item_handles_non_dict_metadata_with_title_fallback():
     assert item.progress == 100
 
 
-class _ScalarList:
-    def __init__(self, values):
-        self._values = values
-
-    def scalars(self):
-        return iter(self._values)
-
-
-class _RetrySession:
-    def __init__(self, document=None, retry_counts=None):
+class _DocumentSession:
+    def __init__(self, document=None):
         self.document = document
-        self.retry_counts = retry_counts or []
-        self.added = []
         self.commits = 0
         self.refreshed = []
 
@@ -167,12 +156,6 @@ class _RetrySession:
         ):
             return self.document
         return None
-
-    def execute(self, statement):
-        return _ScalarList(self.retry_counts)
-
-    def add(self, item):
-        self.added.append(item)
 
     def commit(self):
         self.commits += 1
@@ -194,7 +177,7 @@ def test_set_document_enabled_persists_boolean_and_returns_disabled_item():
         document_metadata={"category": "inverter"},
         updated_at=datetime(2026, 6, 30, 9, 15, 33, tzinfo=UTC),
     )
-    session = _RetrySession(document)
+    session = _DocumentSession(document)
 
     item = set_document_enabled(session, document.id, False)
 
@@ -217,7 +200,7 @@ def test_set_document_enabled_persists_boolean_and_returns_enabled_item():
         document_metadata={"category": "inverter"},
         updated_at=datetime(2026, 6, 30, 9, 15, 33, tzinfo=UTC),
     )
-    session = _RetrySession(document)
+    session = _DocumentSession(document)
 
     item = set_document_enabled(session, document.id, True)
 
@@ -228,98 +211,10 @@ def test_set_document_enabled_persists_boolean_and_returns_enabled_item():
 
 
 def test_set_document_enabled_returns_none_for_missing_document():
-    session = _RetrySession()
+    session = _DocumentSession()
 
     item = set_document_enabled(session, uuid.uuid4(), True)
 
     assert item is None
-    assert session.commits == 0
-    assert session.refreshed == []
-
-
-def test_retry_document_parse_skips_duplicate_placeholder_task():
-    document = KbDocument(
-        id=uuid.uuid4(),
-        title="故障案例",
-        file_name="故障案例.pdf",
-        file_type="pdf",
-        status=DocumentStatus.processing,
-        enabled=False,
-        segment_count=0,
-        error_message=None,
-        document_metadata={"category": "cases", "progress": 15, "retry_placeholder": True},
-        updated_at=datetime(2026, 6, 30, 12, 30, 0, tzinfo=UTC),
-    )
-    session = _RetrySession(document)
-
-    item = retry_document_parse(session, document.id)
-
-    assert item.parseStatus == "processing"
-    assert item.progress == 15
-    assert session.added == []
-    assert session.commits == 0
-    assert session.refreshed == []
-
-
-def test_retry_document_parse_adds_one_placeholder_task_on_first_retry():
-    document = KbDocument(
-        id=uuid.uuid4(),
-        title="导入失败文档",
-        file_name="故障案例.pdf",
-        file_type="pdf",
-        status=DocumentStatus.failed,
-        enabled=True,
-        segment_count=0,
-        error_message="old failure",
-        document_metadata={"category": "cases"},
-        updated_at=datetime(2026, 6, 30, 13, 0, 0, tzinfo=UTC),
-    )
-    session = _RetrySession(document)
-
-    item = retry_document_parse(session, document.id)
-
-    assert item.parseStatus == "processing"
-    assert item.enableStatus == "disabled"
-    assert item.progress == 15
-    assert document.error_message is None
-    assert document.document_metadata["retry_placeholder"] is True
-    assert len(session.added) == 1
-    assert isinstance(session.added[0], ParseTask)
-    assert session.added[0].status == ParseTaskStatus.pending
-    assert session.added[0].parser_name == "manual-retry-placeholder"
-    assert session.added[0].retry_count == 1
-    assert session.added[0].task_metadata["placeholder"] is True
-    assert session.commits == 1
-    assert session.refreshed == [document]
-
-
-def test_retry_document_parse_increments_retry_count_from_existing_tasks():
-    document = KbDocument(
-        id=uuid.uuid4(),
-        title="瀵煎叆澶辫触鏂囨。",
-        file_name="鏁呴殰妗堜緥.pdf",
-        file_type="pdf",
-        status=DocumentStatus.failed,
-        enabled=True,
-        segment_count=0,
-        error_message="old failure",
-        document_metadata={"category": "cases"},
-        updated_at=datetime(2026, 6, 30, 13, 0, 0, tzinfo=UTC),
-    )
-    session = _RetrySession(document, retry_counts=[1, 4, 2])
-
-    retry_document_parse(session, document.id)
-
-    assert len(session.added) == 1
-    assert session.added[0].retry_count == 5
-
-
-def test_retry_document_parse_returns_none_for_missing_document():
-    session = _RetrySession()
-
-    item = retry_document_parse(session, uuid.uuid4())
-
-    assert item is None
-    assert session.added == []
     assert session.commits == 0
     assert session.refreshed == []

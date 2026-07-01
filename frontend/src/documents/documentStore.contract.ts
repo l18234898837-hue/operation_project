@@ -1,6 +1,7 @@
 import { useDocumentStore } from "../stores/documents";
 import type {
   DocumentCategoryKey,
+  DocumentDetail,
   DocumentFilters,
   DocumentItem,
   DocumentParseStatus,
@@ -17,6 +18,7 @@ type FilterShape = Assert<IsAssignable<typeof store.filters, DocumentFilters>>;
 type SummaryShape = Assert<IsAssignable<typeof store.summary, DocumentSummary>>;
 type CategoryShape = Assert<IsAssignable<(typeof store.categories)[number]["key"], DocumentCategoryKey>>;
 type ParseStatusShape = Assert<IsAssignable<(typeof store.parseStatusOptions)[number]["value"], DocumentParseStatus | "all">>;
+type SelectedDetailShape = Assert<IsAssignable<typeof store.selectedDocumentDetail, DocumentDetail | null>>;
 
 void store.categories;
 void store.filteredDocuments;
@@ -37,15 +39,26 @@ void store.loadDocuments();
 void store.isLoading;
 void store.isUploading;
 void store.errorMessage;
+void store.selectedDocumentId;
+void store.selectedDocumentDetail;
+void store.isDetailOpen;
+void store.isDetailLoading;
 void store.pendingDocumentIds;
 void store.hasPendingDocumentActions;
+void store.hasProcessingDocuments;
 void store.isDocumentPending("doc-inverter-manual");
 void store.uploadDocumentFile(new File(["contract"], "contract.pdf", { type: "application/pdf" }));
 void store.toggleDocumentEnabled("doc-inverter-manual");
 void store.retryParse("doc-grid-failure");
+void store.refreshProcessingDocuments();
+void store.openDocumentDetail("doc-inverter-manual");
+void store.closeDocumentDetail();
+void store.loadDocumentDetail("doc-inverter-manual");
+void store.refreshSelectedDocumentDetail();
 void store.getFailureReason("doc-transformer-guide");
 void (null as unknown as DocumentsAreDocumentItems);
 void (null as unknown as FilterShape);
 void (null as unknown as SummaryShape);
 void (null as unknown as CategoryShape);
 void (null as unknown as ParseStatusShape);
+void (null as unknown as SelectedDetailShape);

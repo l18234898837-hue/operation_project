@@ -1,7 +1,9 @@
+from __future__ import annotations
+
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy import URL
 
@@ -40,15 +42,36 @@ class Settings(BaseSettings):
     redis_port: int = 6379
     redis_db: int = 0
 
-    upload_storage_dir: Path = PROJECT_ROOT / "backend" / "uploads" / "documents"
+    knowledge_base_dir: Path = PROJECT_ROOT / "data" / "knowledge_base"
+    original_storage_dir: Path | None = None
+    markdown_storage_dir: Path | None = None
+    upload_storage_dir: Path | None = None
     upload_max_bytes: int = 20 * 1024 * 1024
 
-    @field_validator("upload_storage_dir")
+    @field_validator(
+        "knowledge_base_dir",
+        "original_storage_dir",
+        "markdown_storage_dir",
+        "upload_storage_dir",
+    )
     @classmethod
-    def resolve_upload_storage_dir(cls, value: Path) -> Path:
+    def resolve_storage_dir(cls, value: Path | None) -> Path | None:
+        if value is None:
+            return None
         if value.is_absolute():
             return value
         return PROJECT_ROOT / value
+
+    @model_validator(mode="after")
+    def apply_storage_dir_defaults(self) -> Settings:
+        if self.original_storage_dir is None:
+            self.original_storage_dir = self.upload_storage_dir
+        if self.original_storage_dir is None:
+            self.original_storage_dir = self.knowledge_base_dir / "originals"
+        if self.markdown_storage_dir is None:
+            self.markdown_storage_dir = self.knowledge_base_dir / "markdown" / "generated"
+        self.upload_storage_dir = self.original_storage_dir
+        return self
 
     llm_base_url: str = ""
     llm_api_key: str = ""
@@ -104,7 +127,6 @@ class Settings(BaseSettings):
             port=self.db_port,
             database=self.db_name,
         )
-
 
 @lru_cache
 def get_settings() -> Settings:

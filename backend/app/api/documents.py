@@ -11,15 +11,17 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.db.session import SessionLocal
 from app.schemas.documents import (
+    DocumentDetailSchema,
     DocumentEnableRequest,
     DocumentItemSchema,
     DocumentUploadErrorSchema,
 )
 from app.services.document_management import (
+    get_document_detail,
     list_document_items,
-    retry_document_parse,
     set_document_enabled,
 )
+from app.services.document_parsing import retry_document_parse
 from app.services.document_uploads import UploadedFileData, upload_document_file
 from app.services.siliconflow import SiliconFlowEmbeddingClient
 
@@ -39,15 +41,15 @@ class DocumentManager:
     def list_documents(self) -> list[DocumentItemSchema]:
         return list_document_items(self._session)
 
+    def get_detail(self, document_id: uuid.UUID) -> DocumentDetailSchema | None:
+        return get_document_detail(self._session, document_id)
+
     def set_enabled(
         self,
         document_id: uuid.UUID,
         enabled: bool,
     ) -> DocumentItemSchema | None:
         return set_document_enabled(self._session, document_id, enabled)
-
-    def retry_parse(self, document_id: uuid.UUID) -> DocumentItemSchema | None:
-        return retry_document_parse(self._session, document_id)
 
 
 class DocumentUploader:
@@ -72,7 +74,8 @@ class DocumentUploader:
                     filename=file.filename or "",
                     content=content,
                 ),
-                upload_dir=settings.upload_storage_dir,
+                original_storage_dir=settings.original_storage_dir,
+                markdown_storage_dir=settings.markdown_storage_dir,
                 max_bytes=settings.upload_max_bytes,
                 embedding_client=embedding_client,
                 embedding_model=settings.embedding_model,
@@ -91,6 +94,30 @@ class DocumentUploader:
             chunks.append(chunk)
 
 
+class DocumentParser:
+    def __init__(self, session: Session):
+        self._session = session
+
+    async def retry_parse(self, document_id: uuid.UUID) -> DocumentItemSchema | None:
+        async with httpx.AsyncClient(
+            base_url=settings.embedding_base_url,
+            timeout=httpx.Timeout(settings.model_api_timeout_seconds),
+        ) as client:
+            embedding_client = SiliconFlowEmbeddingClient(
+                client=client,
+                api_key=settings.embedding_api_key,
+                model=settings.embedding_model,
+                dimension=settings.embedding_dimension,
+            )
+            return await retry_document_parse(
+                session=self._session,
+                document_id=document_id,
+                embedding_client=embedding_client,
+                embedding_model=settings.embedding_model,
+                markdown_storage_dir=settings.markdown_storage_dir,
+            )
+
+
 def get_document_manager(
     session: Session = Depends(get_db_session),
 ) -> DocumentManager:
@@ -103,11 +130,28 @@ def get_document_uploader(
     return DocumentUploader(session)
 
 
+def get_document_parser(
+    session: Session = Depends(get_db_session),
+) -> DocumentParser:
+    return DocumentParser(session)
+
+
 @router.get("", response_model=list[DocumentItemSchema])
 async def list_documents(
     manager: DocumentManager = Depends(get_document_manager),
 ) -> list[DocumentItemSchema]:
     return manager.list_documents()
+
+
+@router.get("/{document_id}", response_model=DocumentDetailSchema)
+async def get_document_detail_endpoint(
+    document_id: uuid.UUID,
+    manager: DocumentManager = Depends(get_document_manager),
+) -> DocumentDetailSchema:
+    document = manager.get_detail(document_id)
+    if document is None:
+        raise HTTPException(status_code=404, detail="Document not found")
+    return document
 
 
 @router.post(
@@ -140,9 +184,9 @@ async def update_document_enabled(
 @router.post("/{document_id}/retry", response_model=DocumentItemSchema)
 async def retry_document(
     document_id: uuid.UUID,
-    manager: DocumentManager = Depends(get_document_manager),
+    parser: DocumentParser = Depends(get_document_parser),
 ) -> DocumentItemSchema:
-    document = manager.retry_parse(document_id)
+    document = await parser.retry_parse(document_id)
     if document is None:
         raise HTTPException(status_code=404, detail="Document not found")
     return document

@@ -1,4 +1,4 @@
-import type { DocumentItem } from "../types/document";
+import type { DocumentDetail, DocumentItem } from "../types/document";
 
 async function getDocumentErrorMessage(response: Response) {
   try {
@@ -50,6 +50,15 @@ export async function retryDocumentParse(id: string): Promise<DocumentItem> {
   });
 
   return parseDocumentResponse(response);
+}
+
+export async function getDocumentDetail(id: string): Promise<DocumentDetail> {
+  const response = await fetch(`/api/documents/${id}`);
+  if (!response.ok) {
+    throw new Error(await getDocumentErrorMessage(response));
+  }
+
+  return (await response.json()) as DocumentDetail;
 }
 
 export async function uploadDocument(file: File): Promise<DocumentItem> {

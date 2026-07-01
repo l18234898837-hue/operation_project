@@ -110,6 +110,7 @@ class KbDocument(TimestampMixin, Base):
     )
     title: Mapped[str] = mapped_column(String(512), nullable=False)
     source_path: Mapped[str | None] = mapped_column(Text)
+    markdown_path: Mapped[str | None] = mapped_column(Text)
     file_name: Mapped[str | None] = mapped_column(String(512))
     file_type: Mapped[str | None] = mapped_column(String(255))
     file_sha256: Mapped[str | None] = mapped_column(String(64))

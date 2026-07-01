@@ -11,3 +11,4 @@ jieba
 httpx
 pgvector
 python-multipart
+markitdown

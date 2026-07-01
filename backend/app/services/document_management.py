@@ -7,8 +7,18 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models.rag import DocumentStatus, KbDocument, ParseTask, ParseTaskStatus
-from app.schemas.documents import DocumentItemSchema
+from app.models.rag import (
+    DocumentStatus,
+    KbDocument,
+    KbDocumentSegment,
+    ParseTask,
+)
+from app.schemas.documents import (
+    DocumentDetailSchema,
+    DocumentItemSchema,
+    ParseTaskSummarySchema,
+    SegmentPreviewSchema,
+)
 
 
 KNOWN_CATEGORIES = {
@@ -47,44 +57,50 @@ def set_document_enabled(
     return map_document_item(document)
 
 
-def retry_document_parse(
+def get_document_detail(
     session: Session,
     document_id: uuid.UUID,
-) -> DocumentItemSchema | None:
+) -> DocumentDetailSchema | None:
     document = session.get(KbDocument, document_id)
     if document is None:
         return None
 
-    metadata = _metadata(document.document_metadata)
-    if (
-        document.status == DocumentStatus.processing
-        and metadata.get("retry_placeholder") is True
-    ):
-        return map_document_item(document)
-
-    metadata["progress"] = 15
-    metadata["retry_placeholder"] = True
-
-    document.status = DocumentStatus.processing
-    document.enabled = False
-    document.error_message = None
-    document.document_metadata = metadata
-    session.add(
-        ParseTask(
-            document_id=document.id,
-            status=ParseTaskStatus.pending,
-            parser_name="manual-retry-placeholder",
-            retry_count=_next_retry_count(session, document.id),
-            error_message=None,
-            task_metadata={
-                "placeholder": True,
-                "message": "Retry requested from document management page.",
-            },
+    tasks = (
+        session.execute(
+            select(ParseTask)
+            .where(ParseTask.document_id == document_id)
+            .order_by(
+                ParseTask.started_at.desc().nullslast(),
+                ParseTask.created_at.desc(),
+            )
+            .limit(5)
         )
+        .scalars()
+        .all()
     )
-    session.commit()
-    session.refresh(document)
-    return map_document_item(document)
+    segments = (
+        session.execute(
+            select(KbDocumentSegment)
+            .where(KbDocumentSegment.document_id == document_id)
+            .order_by(KbDocumentSegment.chunk_index.asc())
+            .limit(3)
+        )
+        .scalars()
+        .all()
+    )
+    recent_tasks = [_map_parse_task_summary(task) for task in tasks]
+
+    return DocumentDetailSchema(
+        item=map_document_item(document),
+        sourcePath=document.source_path,
+        markdownPath=document.markdown_path,
+        fileSha256=document.file_sha256,
+        segmentCount=document.segment_count,
+        metadata=_metadata(document.document_metadata),
+        latestTask=recent_tasks[0] if recent_tasks else None,
+        recentTasks=recent_tasks,
+        segmentPreview=[_map_segment_preview(segment) for segment in segments],
+    )
 
 
 def map_document_item(document: KbDocument) -> DocumentItemSchema:
@@ -147,10 +163,31 @@ def _progress(status: DocumentStatus, metadata: dict[str, Any]) -> int | None:
     return None
 
 
-def _next_retry_count(session: Session, document_id: uuid.UUID) -> int:
-    retry_counts = list(
-        session.execute(
-            select(ParseTask.retry_count).where(ParseTask.document_id == document_id)
-        ).scalars()
+def _map_parse_task_summary(task: ParseTask) -> ParseTaskSummarySchema:
+    return ParseTaskSummarySchema(
+        id=task.id,
+        status=task.status.value,
+        parserName=task.parser_name,
+        retryCount=task.retry_count,
+        durationMs=task.duration_ms,
+        errorMessage=task.error_message,
+        startedAt=_format_datetime(task.started_at),
+        finishedAt=_format_datetime(task.finished_at),
     )
-    return max([0, *retry_counts]) + 1
+
+
+def _map_segment_preview(segment: KbDocumentSegment) -> SegmentPreviewSchema:
+    return SegmentPreviewSchema(
+        id=segment.id,
+        chunkIndex=segment.chunk_index,
+        headingPath=segment.heading_path,
+        sectionTitle=segment.section_title,
+        charCount=segment.char_count,
+        hasEmbedding=segment.embedding is not None,
+    )
+
+
+def _format_datetime(value: Any) -> str | None:
+    if value is None:
+        return None
+    return value.strftime("%Y-%m-%d %H:%M:%S")

@@ -39,3 +39,35 @@ class DocumentEnableRequest(BaseModel):
 
 class DocumentUploadErrorSchema(BaseModel):
     message: str
+
+
+class ParseTaskSummarySchema(BaseModel):
+    id: uuid.UUID
+    status: Literal["pending", "running", "success", "failed"]
+    parserName: str | None
+    retryCount: int
+    durationMs: int | None
+    errorMessage: str | None
+    startedAt: str | None
+    finishedAt: str | None
+
+
+class SegmentPreviewSchema(BaseModel):
+    id: uuid.UUID
+    chunkIndex: int
+    headingPath: str | None
+    sectionTitle: str | None
+    charCount: int
+    hasEmbedding: bool
+
+
+class DocumentDetailSchema(BaseModel):
+    item: DocumentItemSchema
+    sourcePath: str | None
+    markdownPath: str | None
+    fileSha256: str | None
+    segmentCount: int
+    metadata: dict
+    latestTask: ParseTaskSummarySchema | None
+    recentTasks: list[ParseTaskSummarySchema]
+    segmentPreview: list[SegmentPreviewSchema]

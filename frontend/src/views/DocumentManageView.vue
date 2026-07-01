@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import {
   CircleCheck,
   Clock,
@@ -11,6 +11,7 @@ import {
   Warning
 } from "@element-plus/icons-vue";
 
+import DocumentDetailFloatingPanel from "../components/documents/DocumentDetailFloatingPanel.vue";
 import { useDocumentStore } from "../stores/documents";
 import type { DocumentItem, DocumentType } from "../types/document";
 
@@ -18,22 +19,73 @@ const documentStore = useDocumentStore();
 const failureDialogVisible = ref(false);
 const selectedFailure = ref<DocumentItem | null>(null);
 const uploadInput = ref<HTMLInputElement | null>(null);
+let processingRefreshTimer: ReturnType<typeof window.setInterval> | null = null;
+
+function stopProcessingRefreshTimer() {
+  if (!processingRefreshTimer) {
+    return;
+  }
+
+  window.clearInterval(processingRefreshTimer);
+  processingRefreshTimer = null;
+}
+
+function startProcessingRefreshTimer() {
+  if (processingRefreshTimer) {
+    return;
+  }
+
+  processingRefreshTimer = window.setInterval(() => {
+    void documentStore.refreshProcessingDocuments();
+  }, 5000);
+}
+
+function handleKeydown(event: KeyboardEvent) {
+  if (event.key === "Escape" && documentStore.isDetailOpen) {
+    documentStore.closeDocumentDetail();
+  }
+}
 
 onMounted(() => {
   void documentStore.loadDocuments();
+  window.addEventListener("keydown", handleKeydown);
 });
 
-const categoryTabs = computed(() => [
-  ...documentStore.categories,
-  { key: "processing" as const, label: "解析中", count: documentStore.summary.processing },
-  { key: "failed" as const, label: "解析失败", count: documentStore.summary.failed },
-  { key: "enabled" as const, label: "已启用", count: documentStore.summary.enabled },
-  {
-    key: "disabled" as const,
-    label: "已禁用",
-    count: documentStore.documents.filter((document) => document.enableStatus === "disabled").length
+watch(
+  () => documentStore.hasProcessingDocuments,
+  (hasProcessingDocuments) => {
+    if (hasProcessingDocuments) {
+      startProcessingRefreshTimer();
+      return;
+    }
+
+    stopProcessingRefreshTimer();
+  },
+  { immediate: true }
+);
+
+watch(
+  () => [documentStore.filteredDocuments, documentStore.selectedDocumentId] as const,
+  ([documents, selectedId]) => {
+    if (!selectedId) {
+      return;
+    }
+    if (!documents.some((document) => document.id === selectedId)) {
+      documentStore.closeDocumentDetail();
+    }
   }
-]);
+);
+
+onUnmounted(() => {
+  stopProcessingRefreshTimer();
+  window.removeEventListener("keydown", handleKeydown);
+});
+
+const selectedTreeNodeLabel = computed(
+  () =>
+    documentStore.documentTreeNodes.find((node) => node.id === documentStore.selectedTreeNodeId)?.label ??
+    documentStore.currentCategoryLabel
+);
 
 const metricCards = computed(() => [
   {
@@ -80,6 +132,22 @@ function statusLabel(document: DocumentItem) {
   return labels[document.parseStatus];
 }
 
+function parseActionLabel(document: DocumentItem) {
+  if (documentStore.isDocumentPending(document.id)) {
+    return "处理中";
+  }
+  if (document.parseStatus === "ready") {
+    return "重新解析";
+  }
+  if (document.parseStatus === "failed") {
+    return "重试解析";
+  }
+  if (document.parseStatus === "processing") {
+    return "解析中";
+  }
+  return "开始解析";
+}
+
 function typeClass(type: DocumentType) {
   return `type-${type.toLowerCase()}`;
 }
@@ -87,6 +155,41 @@ function typeClass(type: DocumentType) {
 function showFailure(document: DocumentItem) {
   selectedFailure.value = document;
   failureDialogVisible.value = true;
+}
+
+function isRetryDisabled(document: DocumentItem) {
+  return documentStore.isDocumentPending(document.id) || document.parseStatus === "processing";
+}
+
+function shouldIgnoreRowClick(target: EventTarget | null) {
+  return target instanceof HTMLElement
+    ? Boolean(target.closest("button, a, input, select, textarea, [role='button']"))
+    : false;
+}
+
+function handleRowClick(document: DocumentItem, event: MouseEvent) {
+  if (shouldIgnoreRowClick(event.target)) {
+    return;
+  }
+
+  void documentStore.openDocumentDetail(document.id);
+}
+
+async function triggerParse(document: DocumentItem) {
+  if (isRetryDisabled(document)) {
+    return;
+  }
+
+  const confirmed = window.confirm("确认重新解析该文档？这会重建文档分段。");
+  if (!confirmed) {
+    return;
+  }
+
+  await documentStore.retryParse(document.id);
+}
+
+function closeDetailPanel() {
+  documentStore.closeDocumentDetail();
 }
 
 function openUploadPicker() {
@@ -129,26 +232,26 @@ async function handleUploadChange(event: Event) {
       </label>
 
       <button
-        v-for="category in categoryTabs"
-        :key="category.key"
+        v-for="node in documentStore.documentTreeNodes"
+        :key="node.id"
         class="document-category-item"
-        :class="{ active: documentStore.filters.category === category.key }"
+        :class="[{ active: documentStore.selectedTreeNodeId === node.id }, `tree-${node.kind}`]"
         type="button"
-        @click="documentStore.setCategory(category.key)"
+        @click="documentStore.selectTreeNode(node)"
       >
         <Folder aria-hidden="true" />
-        <span>{{ category.label }}</span>
-        <strong>{{ category.count }}</strong>
+        <span>{{ node.label }}</span>
+        <strong>{{ node.count }}</strong>
       </button>
     </aside>
 
-    <main class="document-main">
+    <main class="document-main" :class="{ 'document-main-detail-open': documentStore.isDetailOpen }">
       <header class="document-hero">
         <div>
           <p class="eyebrow">Knowledge Base Intake</p>
           <h1>文档管理</h1>
           <span>管理知识库文档、解析任务与启用状态</span>
-          <strong>当前分类：{{ documentStore.currentCategoryLabel }}</strong>
+          <strong>当前分类：{{ selectedTreeNodeLabel }}</strong>
         </div>
         <input
           ref="uploadInput"
@@ -237,7 +340,7 @@ async function handleUploadChange(event: Event) {
           class="document-reset"
           type="button"
           :disabled="documentStore.isLoading || documentStore.hasPendingDocumentActions"
-          @click="documentStore.loadDocuments"
+          @click="documentStore.loadDocuments()"
         >
           <Refresh aria-hidden="true" />
           {{ documentStore.isLoading ? "刷新中" : documentStore.hasPendingDocumentActions ? "处理中" : "刷新列表" }}
@@ -266,7 +369,12 @@ async function handleUploadChange(event: Event) {
             </tr>
           </thead>
           <tbody>
-            <tr v-for="document in documentStore.paginatedDocuments" :key="document.id">
+            <tr
+              v-for="document in documentStore.paginatedDocuments"
+              :key="document.id"
+              :class="{ selected: documentStore.selectedDocumentId === document.id }"
+              @click="handleRowClick(document, $event)"
+            >
               <td>
                 <div class="document-name-cell">
                   <span class="document-type-icon" :class="typeClass(document.type)">
@@ -318,13 +426,12 @@ async function handleUploadChange(event: Event) {
                     }}
                   </button>
                   <button
-                    v-if="document.parseStatus === 'failed'"
                     class="primary"
                     type="button"
-                    :disabled="documentStore.isDocumentPending(document.id)"
-                    @click="documentStore.retryParse(document.id)"
+                    :disabled="isRetryDisabled(document)"
+                    @click="triggerParse(document)"
                   >
-                    {{ documentStore.isDocumentPending(document.id) ? "处理中" : "重新解析" }}
+                    {{ parseActionLabel(document) }}
                   </button>
                 </div>
               </td>
@@ -363,6 +470,27 @@ async function handleUploadChange(event: Event) {
       </footer>
 
       <p v-if="documentStore.lastNotice" class="document-notice">{{ documentStore.lastNotice }}</p>
+
+      <DocumentDetailFloatingPanel
+        :open="documentStore.isDetailOpen"
+        :detail="documentStore.selectedDocumentDetail"
+        :loading="documentStore.isDetailLoading"
+        :pending="
+          documentStore.selectedDocumentId
+            ? documentStore.isDocumentPending(documentStore.selectedDocumentId)
+            : false
+        "
+        @close="closeDetailPanel"
+        @toggle-enabled="documentStore.toggleDocumentEnabled"
+        @retry-parse="
+          (id) => {
+            const document = documentStore.documents.find((item) => item.id === id);
+            if (document) {
+              void triggerParse(document);
+            }
+          }
+        "
+      />
     </main>
 
     <el-dialog v-model="failureDialogVisible" title="解析失败原因" width="460px">
@@ -377,10 +505,10 @@ async function handleUploadChange(event: Event) {
           v-if="selectedFailure"
           class="document-upload-primary dialog-action"
           type="button"
-          :disabled="documentStore.isDocumentPending(selectedFailure.id)"
-          @click="documentStore.retryParse(selectedFailure.id); failureDialogVisible = false"
+          :disabled="isRetryDisabled(selectedFailure)"
+          @click="triggerParse(selectedFailure); failureDialogVisible = false"
         >
-          {{ documentStore.isDocumentPending(selectedFailure.id) ? "处理中" : "重新解析" }}
+          {{ parseActionLabel(selectedFailure) }}
         </button>
       </template>
     </el-dialog>
