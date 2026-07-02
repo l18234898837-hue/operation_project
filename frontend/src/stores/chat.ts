@@ -35,7 +35,14 @@ function createMessageId() {
 }
 
 function createBackendSessionId(): BackendSessionId {
-  return crypto.randomUUID() as BackendSessionId;
+  if (globalThis.crypto?.randomUUID) {
+    return globalThis.crypto.randomUUID() as BackendSessionId;
+  }
+
+  return "10000000-1000-4000-8000-100000000000".replace(/[018]/g, (char) => {
+    const randomValue = Math.floor(Math.random() * 16);
+    return (Number(char) ^ (randomValue & (15 >> (Number(char) / 4)))).toString(16);
+  }) as BackendSessionId;
 }
 
 const CHAT_STORAGE_KEY = "pvqa-chat-state";
