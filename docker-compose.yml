@@ -1,4 +1,50 @@
 services:
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    image: pv-qa-frontend:local
+    container_name: pv-qa-frontend
+    ports:
+      - "8080:80"
+    depends_on:
+      api:
+        condition: service_healthy
+
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: pv-qa-api:local
+    container_name: pv-qa-api
+    env_file:
+      - .env
+    environment:
+      APP_ENV: docker
+      APP_PORT: 8000
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: operation_pv
+      DB_USER: postgres
+      DB_PASSWORD: postgres
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+    ports:
+      - "8000:8000"
+    volumes:
+      - backend_uploads:/workspace/backend/uploads
+      - ./data/knowledge_base:/workspace/data/knowledge_base:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   postgres:
     image: pgvector/pgvector:pg16
     container_name: pv-qa-postgres
@@ -7,7 +53,7 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
     ports:
-      - "5432:5432"
+      - "15432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
@@ -29,4 +75,5 @@ services:
       retries: 5
 
 volumes:
+  backend_uploads:
   postgres_data:
